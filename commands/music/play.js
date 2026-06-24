@@ -66,7 +66,6 @@ module.exports = {
               return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no YouTube para essa música do Spotify.' });
             }
             
-            // CORREÇÃO: Garante a extração da URL ou ID forçado se a propriedade url estiver nula
             finalUrl = searchResults[0].url || `https://www.youtube.com/watch?v=${searchResults[0].id}`;
             ytInfo = await withTimeout(
               play.video_info(finalUrl),
@@ -81,7 +80,7 @@ module.exports = {
           return interaction.editReply({ content: 'Falha ao processar o link do Spotify. Verifique se a música é pública.' });
         }
       } else if (play.yt_validate(query) === 'video') {
-        finalUrl = query; // Usa o link do YouTube digitado diretamente
+        finalUrl = query; 
         ytInfo = await withTimeout(
           play.video_info(query),
           8000,
@@ -99,7 +98,6 @@ module.exports = {
           return interaction.editReply({ content: 'Nenhum resultado de música correspondente foi encontrado.' });
         }
         
-        // CORREÇÃO: Garante a extração da URL ou ID se a propriedade url estiver vazia no play-dl
         finalUrl = searchResults[0].url || `https://www.youtube.com/watch?v=${searchResults[0].id}`;
         ytInfo = await withTimeout(
           play.video_info(finalUrl),
@@ -108,7 +106,6 @@ module.exports = {
         );
       }
 
-      // Validação final da URL para lançar erro amigável caso de fato fique nulo
       if (!finalUrl || finalUrl.includes('undefined')) {
         throw new Error('Não foi possível obter uma URL de reprodução válida para o vídeo do YouTube.');
       }
