@@ -12,7 +12,6 @@ const User = require('../models/User');
 const BotSettings = require('../models/BotSettings');
 const GuildConfig = require('../models/GuildConfig');
 
-// Importa a gerência global de músicas
 const { queues, deleteQueue, playSong } = require('../utils/musicManager');
 
 const app = express();
@@ -72,6 +71,10 @@ app.use(session({
     httpOnly: true
   }
 }));
+
+// ==========================================
+// 🛠️ FUNÇÕES AUXILIARES DE SEGURANÇA
+// ==========================================
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -380,7 +383,6 @@ app.get('/dashboard/guild/:guildId', async (req, res) => {
       .filter(r => r.name !== '@everyone')
       .map(r => ({ id: r.id, name: r.name }));
 
-    // Obtém a fila de reprodução ativa deste servidor se ela existir
     const serverQueue = queues.get(guildId) || null;
 
     res.render('guild', {
@@ -390,7 +392,7 @@ app.get('/dashboard/guild/:guildId', async (req, res) => {
       roles,
       user: req.session.user,
       success: req.query.success || null,
-      serverQueue // Compartilha a fila com o template EJS
+      serverQueue 
     });
 
   } catch (err) {
@@ -421,10 +423,9 @@ app.post('/dashboard/guild/:guildId/update', async (req, res) => {
 });
 
 // ==========================================
-// 📻 CONTROLADORES DO PLAYER DE MÚSICA WEB
+// 📻 CONTROLADORES DO PLAYER WEB DE MÚSICA
 // ==========================================
 
-// Endpoint do Slider/Botões de Volume
 app.post('/dashboard/guild/:guildId/music/volume', async (req, res) => {
   if (!req.session.user) return res.sendStatus(401);
   const { guildId } = req.params;
@@ -435,7 +436,6 @@ app.post('/dashboard/guild/:guildId/music/volume', async (req, res) => {
     const parsedVolume = parseFloat(volume) / 100;
     serverQueue.volume = parsedVolume;
     
-    // Atualiza dinamicamente o áudio atual se ele estiver tocando
     if (serverQueue.player && serverQueue.player.state.resource) {
       serverQueue.player.state.resource.volume?.setVolume(parsedVolume);
     }
@@ -443,7 +443,6 @@ app.post('/dashboard/guild/:guildId/music/volume', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Endpoint das Ações de Botões (Pular, Parar, Pausar/Retomar, 24/7)
 app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
   if (!req.session.user) return res.sendStatus(401);
   const { guildId } = req.params;
@@ -461,7 +460,7 @@ app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
         serverQueue.playing = true;
         break;
       case 'skip':
-        serverQueue.player.stop(); // Interrompe para disparar o evento Idle do playSong
+        serverQueue.player.stop();
         break;
       case 'stop':
         deleteQueue(guildId);
@@ -474,7 +473,7 @@ app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Endpoint para Adicionar Músicas diretamente do site (Suporta YouTube e Spotify)
+// CORREÇÃO: Adicionar músicas pelo site salvando estritamente a "finalUrl" garantida do YouTube/Spotify
 app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
@@ -489,6 +488,7 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
 
   try {
     let ytInfo = null;
+    let finalUrl = null; // Garante que a URL gerada seja sempre um link válido de vídeo
     const isSpotify = play.sp_validate(query);
 
     if (isSpotify && isSpotify !== 'search') {
@@ -497,29 +497,32 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
         const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
         const searchResults = await play.search(searchQuery, { limit: 1 });
         if (searchResults && searchResults.length > 0) {
-          ytInfo = await play.video_info(searchResults[0].url);
+          finalUrl = searchResults[0].url;
+          ytInfo = await play.video_info(finalUrl);
         }
       }
     } else if (play.yt_validate(query) === 'video') {
+      finalUrl = query;
       ytInfo = await play.video_info(query);
     } else {
       const searchResults = await play.search(query, { limit: 1 });
       if (searchResults && searchResults.length > 0) {
-        ytInfo = await play.video_info(searchResults[0].url);
+        finalUrl = searchResults[0].url;
+        ytInfo = await play.video_info(finalUrl);
       }
     }
 
-    if (ytInfo) {
+    // CORREÇÃO: Usamos a finalUrl e o ytInfo validados para preencher a fila sem nulos
+    if (ytInfo && finalUrl) {
       const song = {
         title: ytInfo.video_details.title,
-        url: `https://www.youtube.com/watch?v=${ytInfo.video_details.id}`,
+        url: finalUrl,
         duration: ytInfo.video_details.durationRaw,
         thumbnail: ytInfo.video_details.thumbnails[0]?.url || ''
       };
 
       serverQueue.songs.push(song);
       
-      // Se a fila estava parada (vazia), iniciamos a reprodução imediata do novo áudio
       if (serverQueue.songs.length === 1) {
         await playSong(guildId, song);
       }
