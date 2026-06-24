@@ -111,7 +111,7 @@ async function sendLoginAlert(userEmail, req) {
 // 🛣️ ROTAS DO SISTEMA
 // ==========================================
 
-// SOLUÇÃO: Rota raiz que resolve o erro de "Cannot GET /"
+// Rota raiz
 app.get('/', (req, res) => {
   if (req.session.user) {
     return res.redirect('/dashboard');
@@ -187,7 +187,7 @@ app.post('/auth/verify-otp', async (req, res) => {
   }
 });
 
-// Login Local com e-mail e senha (sem OTP) + Envio de Alerta
+// Login Local com e-mail e senha (sem OTP) + Envio de Alerta + Ativação VIP automática para o Master
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
@@ -199,6 +199,13 @@ app.post('/auth/login', async (req, res) => {
     const isValid = verifyPassword(password, user.salt, user.passwordHash);
     if (!isValid) {
       return res.render('verify-email', { error: 'Senha incorreta.', success: null });
+    }
+
+    // Regra: se for o e-mail master, garante que ele sempre tenha o VIP ativo no banco de dados
+    const isMasterEmail = email.toLowerCase() === (process.env.MASTER_EMAIL || 'mafiosodashopping@gmail.com').toLowerCase();
+    if (isMasterEmail && !user.isVip) {
+      user.isVip = true;
+      await user.save();
     }
 
     req.session.user = user;
@@ -213,13 +220,13 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// Integração de Login com o Discord (OAuth2)
+// CORREÇÃO: Adicionado '%20email' no escopo do link para o Discord retornar seu e-mail real
 app.get('/auth/discord', (req, res) => {
-  const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20guilds`;
+  const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
 });
 
-// Callback da integração do Discord (Cadastro e Login automáticos de 1 clique)
+// Callback da integração do Discord (Cadastro e Login automáticos de 1 clique) + Ativação VIP automática para o Master
 app.get('/auth/discord/callback', async (req, res) => {
   const { code } = req.query;
   if (!code) return res.redirect('/auth');
@@ -249,13 +256,19 @@ app.get('/auth/discord/callback', async (req, res) => {
 
     // Localiza ou cria automaticamente o registro do usuário
     let user = await User.findOne({ email });
+    const isMasterEmail = email.toLowerCase() === (process.env.MASTER_EMAIL || 'mafiosodashopping@gmail.com').toLowerCase();
+
     if (!user) {
       user = await User.create({
         email,
         username: discordUser.username,
         isVerified: true,
-        isVip: false
+        isVip: isMasterEmail ? true : false // Se for o e-mail Master, já cria a conta com VIP ativo
       });
+    } else if (isMasterEmail && !user.isVip) {
+      // Se a conta já existia mas não tinha VIP, ativa agora
+      user.isVip = true;
+      await user.save();
     }
 
     req.session.user = user;
@@ -325,7 +338,7 @@ app.post('/stripe/checkout', async (req, res) => {
 
 // Middleware de verificação de permissão do Master
 function isMaster(req, res, next) {
-  if (req.session.user && req.session.user.email === process.env.MASTER_EMAIL) {
+  if (req.session.user && req.session.user.email.toLowerCase() === (process.env.MASTER_EMAIL || 'mafiosodashopping@gmail.com').toLowerCase()) {
     return next();
   }
   return res.redirect('/dashboard');
@@ -351,7 +364,6 @@ app.post('/admin/update', isMaster, async (req, res) => {
       activityText
     }, { upsert: true, new: true });
 
-    // Envia sinal ou recarrega dinamicamente no bot se necessário (opcional)
     return res.redirect('/admin');
   } catch (error) {
     console.error(error);
