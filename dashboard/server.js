@@ -5,30 +5,28 @@ const mongoose = require('mongoose');
 const path = require('path');
 const crypto = require('crypto');
 const axios = require('axios');
+const play = require('play-dl');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 const User = require('../models/User');
 const BotSettings = require('../models/BotSettings');
 const GuildConfig = require('../models/GuildConfig');
 
+// Importa a gerência global de músicas
+const { queues, deleteQueue, playSong } = require('../utils/musicManager');
+
 const app = express();
 
-// Confia no proxy reverso do Railway para persistência de sessões
 app.set('trust proxy', 1); 
 
-// Variável local para armazenar a instância do cliente do Discord
 let discordClient = null;
 
-// ==========================================
-// 🔗 FUNÇÃO INTELIGENTE DE REDIRECIONAMENTO
-// ==========================================
 const getRedirectUri = (req) => {
   const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
   const baseUrl = rawBaseUrl.replace(/\/$/, '');
   return `${baseUrl}/auth/discord/callback`;
 };
 
-// Webhook do Stripe
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -75,10 +73,6 @@ app.use(session({
   }
 }));
 
-// ==========================================
-// 🛠️ FUNÇÕES AUXILIARES DE SEGURANÇA
-// ==========================================
-
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
@@ -90,7 +84,6 @@ function verifyPassword(password, salt, hash) {
   return verifyHash === hash;
 }
 
-// CORREÇÃO: Função protegida contra variáveis ausentes no Railway
 async function sendBrevoEmail(toEmail, subject, textContent) {
   const senderEmail = process.env.BREVO_SENDER_EMAIL;
 
@@ -101,7 +94,7 @@ async function sendBrevoEmail(toEmail, subject, textContent) {
 
   try {
     await axios.post('https://api.brevo.com/v3/smtp/email', {
-      sender: { name: "Quasar Bot", email: senderEmail }, // Envia apenas se estiver definido
+      sender: { name: "Quasar Bot", email: senderEmail },
       to: [{ email: toEmail }],
       subject: subject,
       textContent: textContent
@@ -125,10 +118,7 @@ async function sendLoginAlert(userEmail, req) {
   await sendBrevoEmail(userEmail, "⚠️ Alerta de Segurança: Novo Login", text);
 }
 
-// ==========================================
-// 🛣️ ROTAS DO SISTEMA
-// ==========================================
-
+// ROTA RAIZ
 app.get('/', (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (req.session.user) {
@@ -390,13 +380,17 @@ app.get('/dashboard/guild/:guildId', async (req, res) => {
       .filter(r => r.name !== '@everyone')
       .map(r => ({ id: r.id, name: r.name }));
 
+    // Obtém a fila de reprodução ativa deste servidor se ela existir
+    const serverQueue = queues.get(guildId) || null;
+
     res.render('guild', {
       guild,
       config,
       channels,
       roles,
       user: req.session.user,
-      success: req.query.success || null
+      success: req.query.success || null,
+      serverQueue // Compartilha a fila com o template EJS
     });
 
   } catch (err) {
@@ -426,6 +420,121 @@ app.post('/dashboard/guild/:guildId/update', async (req, res) => {
   }
 });
 
+// ==========================================
+// 📻 CONTROLADORES DO PLAYER DE MÚSICA WEB
+// ==========================================
+
+// Endpoint do Slider/Botões de Volume
+app.post('/dashboard/guild/:guildId/music/volume', async (req, res) => {
+  if (!req.session.user) return res.sendStatus(401);
+  const { guildId } = req.params;
+  const { volume } = req.body; 
+
+  const serverQueue = queues.get(guildId);
+  if (serverQueue) {
+    const parsedVolume = parseFloat(volume) / 100;
+    serverQueue.volume = parsedVolume;
+    
+    // Atualiza dinamicamente o áudio atual se ele estiver tocando
+    if (serverQueue.player && serverQueue.player.state.resource) {
+      serverQueue.player.state.resource.volume?.setVolume(parsedVolume);
+    }
+  }
+  res.sendStatus(200);
+});
+
+// Endpoint das Ações de Botões (Pular, Parar, Pausar/Retomar, 24/7)
+app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
+  if (!req.session.user) return res.sendStatus(401);
+  const { guildId } = req.params;
+  const { action } = req.body;
+
+  const serverQueue = queues.get(guildId);
+  if (serverQueue) {
+    switch (action) {
+      case 'pause':
+        serverQueue.player.pause();
+        serverQueue.playing = false;
+        break;
+      case 'resume':
+        serverQueue.player.unpause();
+        serverQueue.playing = true;
+        break;
+      case 'skip':
+        serverQueue.player.stop(); // Interrompe para disparar o evento Idle do playSong
+        break;
+      case 'stop':
+        deleteQueue(guildId);
+        break;
+      case 'toggle247':
+        serverQueue.is247 = !serverQueue.is247;
+        break;
+    }
+  }
+  res.sendStatus(200);
+});
+
+// Endpoint para Adicionar Músicas diretamente do site (Suporta YouTube e Spotify)
+app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  const { guildId } = req.params;
+  const { query } = req.body;
+
+  const serverQueue = queues.get(guildId);
+  if (!serverQueue) {
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=O+bot+precisa+estar+conectado+em+um+canal+de+voz+pelo+Discord+para+que+você+possa+adicionar+músicas+pelo+site.`);
+  }
+
+  try {
+    let ytInfo = null;
+    const isSpotify = play.sp_validate(query);
+
+    if (isSpotify && isSpotify !== 'search') {
+      const spotifyData = await play.spotify(query);
+      if (isSpotify === 'track') {
+        const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
+        const searchResults = await play.search(searchQuery, { limit: 1 });
+        if (searchResults && searchResults.length > 0) {
+          ytInfo = await play.video_info(searchResults[0].url);
+        }
+      }
+    } else if (play.yt_validate(query) === 'video') {
+      ytInfo = await play.video_info(query);
+    } else {
+      const searchResults = await play.search(query, { limit: 1 });
+      if (searchResults && searchResults.length > 0) {
+        ytInfo = await play.video_info(searchResults[0].url);
+      }
+    }
+
+    if (ytInfo) {
+      const song = {
+        title: ytInfo.video_details.title,
+        url: `https://www.youtube.com/watch?v=${ytInfo.video_details.id}`,
+        duration: ytInfo.video_details.durationRaw,
+        thumbnail: ytInfo.video_details.thumbnails[0]?.url || ''
+      };
+
+      serverQueue.songs.push(song);
+      
+      // Se a fila estava parada (vazia), iniciamos a reprodução imediata do novo áudio
+      if (serverQueue.songs.length === 1) {
+        await playSong(guildId, song);
+      }
+
+      return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Música+adicionada+com+sucesso+pelo+site!`);
+    } else {
+      return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Não+foi+possível+carregar+as+informações+desta+faixa.`);
+    }
+
+  } catch (err) {
+    console.error('[ERRO ADD WEB]', err);
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Erro+ao+processar+a+música+solicitada.`);
+  }
+});
+
 // Stripe Checkout
 app.post('/stripe/checkout', async (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
@@ -448,7 +557,7 @@ app.post('/stripe/checkout', async (req, res) => {
   }
 });
 
-// Middleware Master (Validação de e-mail autoritária segura)
+// Middleware Master
 function isMaster(req, res, next) {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (req.session.user && (req.session.user.email === 'mafiosodashopping@gmail.com' || req.session.user.email === process.env.MASTER_EMAIL)) {
@@ -471,7 +580,6 @@ app.post('/admin/update', isMaster, async (req, res) => {
   try {
     await BotSettings.findOneAndUpdate({}, { status, activityEmoji, activityText }, { upsert: true, new: true });
     
-    // Atualiza a presença do Bot ao vivo no Discord sem precisar reiniciar
     if (discordClient) {
       discordClient.user.setPresence({
         status: status,
@@ -491,7 +599,7 @@ app.post('/admin/update', isMaster, async (req, res) => {
 });
 
 function startDashboard(client) {
-  discordClient = client; // Guarda a instância do client
+  discordClient = client; 
   const serverPort = process.env.PORT || 3000;
   app.listen(serverPort, () => {
     console.log(`[PAINEL WEB] Servidor rodando na porta ${serverPort}`);
