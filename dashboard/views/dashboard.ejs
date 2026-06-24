@@ -21,6 +21,16 @@
   </nav>
 
   <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+    <!-- Informações da URL do Painel de Controle -->
+    <div class="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 mb-8 flex flex-col md:flex-row items-center justify-between gap-4">
+      <div>
+        <h3 class="text-lg font-bold text-slate-200">Endereço do Painel</h3>
+        <p class="text-xs text-slate-400 mt-1">Este é o link oficial para retornar e compartilhar a sua central administrativa.</p>
+        <code class="block mt-2 text-xs text-blue-400 bg-slate-950 px-3 py-2 rounded-md font-mono select-all"><%= dashboardUrl %></code>
+      </div>
+      <a href="<%= dashboardUrl %>" class="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-sm font-semibold rounded-lg transition border border-slate-700 text-center w-full md:w-auto">Retornar ao Início</a>
+    </div>
+
     <!-- Caixa VIP -->
     <div class="bg-gradient-to-r from-blue-900/30 to-indigo-950/20 border border-blue-900/50 rounded-2xl p-6 mb-8 flex flex-col md:flex-row items-center justify-between">
       <div>
