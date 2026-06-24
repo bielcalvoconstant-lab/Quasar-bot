@@ -16,8 +16,8 @@
     </div>
   </nav>
 
-  <main class="max-w-2xl mx-auto px-4 py-12 flex-grow w-full">
-    <div class="flex items-center gap-4 mb-8">
+  <main class="max-w-2xl mx-auto px-4 py-12 flex-grow w-full space-y-8">
+    <div class="flex items-center gap-4">
       <% if (guild.icon) { %>
         <img src="https://cdn.discordapp.com/icons/<%= guild.id %>/<%= guild.icon %>.png" class="w-16 h-16 rounded-full border border-slate-700">
       <% } else { %>
@@ -30,12 +30,13 @@
     </div>
 
     <% if (success) { %>
-      <div class="bg-green-500/10 border border-green-500 text-green-400 p-4 rounded-lg text-sm mb-6">
+      <div class="bg-green-500/10 border border-green-500 text-green-400 p-4 rounded-lg text-sm">
         <%= success %>
       </div>
     <% } %>
 
-    <form action="/dashboard/guild/<%= guild.id %>/update" method="POST" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+    <!-- Formulário Administrativo do Servidor -->
+    <form action="/dashboard/guild/<%= guild.id %>/update" method="POST" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
       
       <!-- Canal de Logs -->
       <div>
@@ -46,30 +47,132 @@
             <option value="<%= channel.id %>" <%= config.logChannelId === channel.id ? 'selected' : '' %>># <%= channel.name %></option>
           <% }) %>
         </select>
-        <span class="text-xxs text-slate-500 block mt-1">Canal onde serão publicados os relatórios das punições executadas pelo bot.</span>
       </div>
 
       <!-- Cargo Staff -->
       <div>
-        <label class="block text-xs font-semibold uppercase text-slate-400 tracking-widest mb-2">Cargo Permitido para Moderação</label>
+        <label class="block text-xs font-semibold uppercase text-slate-400 tracking-widest mb-2">Cargo Permitido para Moderação (Staff)</label>
         <select name="staffRoleId" class="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-100 focus:ring-2 focus:ring-blue-500 outline-none">
           <option value="">Nenhum selecionado</option>
           <% roles.forEach(role => { %>
             <option value="<%= role.id %>" <%= config.staffRoleId === role.id ? 'selected' : '' %>>@ <%= role.name %></option>
           <% }) %>
         </select>
-        <span class="text-xxs text-slate-500 block mt-1">Cargo autorizado a interagir com os comandos de banimento e auditoria.</span>
       </div>
 
-      <!-- Limite de Punições -->
+      <!-- Limite Diário -->
       <div>
         <label class="block text-xs font-semibold uppercase text-slate-400 tracking-widest mb-2">Limite Diário de Punições Preventivas</label>
         <input type="number" name="punishmentLimit" min="1" max="100" value="<%= config.punishmentLimit || 5 %>" class="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-100 outline-none focus:ring-2 focus:ring-blue-500">
-        <span class="text-xxs text-slate-500 block mt-1">Número máximo de expulsões e banimentos que o bot executará por dia para proteger o servidor de abusos.</span>
+        <span class="text-xxs text-slate-500 block mt-1">Quantidade diária permitida antes de acionar alertas de segurança.</span>
       </div>
 
       <button type="submit" class="w-full py-3 bg-blue-600 hover:bg-blue-700 font-bold rounded-lg transition-colors">Salvar Configurações</button>
     </form>
+
+    <!-- ==========================================
+         📻 SEÇÃO DO PLAYER WEB DE MÚSICA AO VIVO
+         ========================================== -->
+    <% if (serverQueue) { %>
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+          <h3 class="text-lg font-bold text-blue-400 flex items-center gap-2">
+            <span>📻 Player Web ao Vivo</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded text-xxs font-bold bg-green-500/10 text-green-400">Ativo</span>
+          </h3>
+          <span class="text-xs text-slate-400">Canal: <%= serverQueue.voiceChannel.name %></span>
+        </div>
+
+        <!-- Tocando Agora -->
+        <div class="flex items-center gap-4 bg-slate-950 p-4 rounded-xl border border-slate-850">
+          <% if (serverQueue.songs[0].thumbnail) { %>
+            <img src="<%= serverQueue.songs[0].thumbnail %>" class="w-16 h-16 rounded-lg object-cover">
+          <% } %>
+          <div class="flex-grow">
+            <span class="text-xxs font-bold text-slate-500 uppercase tracking-widest">Tocando Agora</span>
+            <h4 class="font-bold text-slate-200 text-sm line-clamp-1"><%= serverQueue.songs[0].title %></h4>
+            <p class="text-xs text-slate-400 mt-0.5">Duração: <%= serverQueue.songs[0].duration %></p>
+          </div>
+        </div>
+
+        <!-- Controles Rápidos -->
+        <div class="flex flex-wrap gap-2 justify-center py-2 border-b border-slate-800 pb-4">
+          <button onclick="sendControl('pause')" class="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-xs font-bold rounded-lg transition">Pausar</button>
+          <button onclick="sendControl('resume')" class="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-xs font-bold rounded-lg transition">Retomar</button>
+          <button onclick="sendControl('skip')" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-xs font-bold rounded-lg transition">Pular</button>
+          <button onclick="sendControl('stop')" class="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-xs font-bold rounded-lg transition">Parar</button>
+          <button onclick="sendControl('toggle247')" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg transition border border-slate-700">Modo 24/7: <%= serverQueue.is247 ? 'Ativo' : 'Inativo' %></button>
+        </div>
+
+        <!-- Ajuste Interativo de Volume -->
+        <div class="flex items-center justify-between gap-4 p-4 bg-slate-950 rounded-xl border border-slate-850">
+          <span class="text-xs font-bold text-slate-400">Volume do Player</span>
+          <div class="flex items-center gap-2">
+            <button onclick="adjustVolume(-10)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded border border-slate-700">-10%</button>
+            <span class="text-xs font-mono font-bold text-blue-400 w-12 text-center" id="volume-display"><%= Math.round(serverQueue.volume * 100) %>%</span>
+            <button onclick="adjustVolume(10)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded border border-slate-700">+10%</button>
+          </div>
+        </div>
+
+        <!-- Formulário para Adicionar Músicas diretamente pelo site -->
+        <form action="/dashboard/guild/<%= guild.id %>/music/add" method="POST" class="space-y-2 pt-2 border-t border-slate-800">
+          <label class="block text-xs font-semibold uppercase text-slate-400 tracking-widest">Adicionar Música pelo Site</label>
+          <div class="flex gap-2">
+            <input type="text" name="query" placeholder="Nome da música, link do YouTube ou Spotify" required class="flex-grow px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-xs text-slate-100 outline-none focus:ring-1 focus:ring-blue-500">
+            <button type="submit" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-xs font-bold rounded-lg transition">Adicionar</button>
+          </div>
+        </form>
+
+        <!-- Fila de Músicas -->
+        <div class="space-y-2">
+          <label class="block text-xs font-semibold uppercase text-slate-400 tracking-widest mb-1">Próximas da Fila</label>
+          <div class="bg-slate-950 rounded-xl border border-slate-850 p-3 max-h-40 overflow-y-auto space-y-2 text-xs">
+            <% if (serverQueue.songs.length <= 1) { %>
+              <p class="text-slate-500 italic text-center py-2">Nenhuma música na fila de espera.</p>
+            <% } else { %>
+              <% serverQueue.songs.slice(1).forEach((song, idx) => { %>
+                <div class="flex items-center justify-between border-b border-slate-900 pb-1.5 last:border-0 last:pb-0">
+                  <span class="text-slate-300 font-medium truncate max-w-xs"><%= idx + 1 %>. <%= song.title %></span>
+                  <span class="text-slate-500 font-mono text-xxs"><%= song.duration %></span>
+                </div>
+              <% }) %>
+            <% } %>
+          </div>
+        </div>
+      </div>
+
+      <script>
+        // Envia as ordens de ações (pause, resume, skip, stop, toggle247) para o Express
+        async function sendControl(action) {
+          await fetch('/dashboard/guild/<%= guild.id %>/music/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action })
+          });
+          location.reload();
+        }
+
+        // Envia a atualização de volume de forma dinâmica
+        let currentVolume = <%= Math.round(serverQueue.volume * 100) %>;
+        async function adjustVolume(change) {
+          currentVolume = Math.min(Math.max(currentVolume + change, 0), 100);
+          document.getElementById('volume-display').innerText = currentVolume + '%';
+          await fetch('/dashboard/guild/<%= guild.id %>/music/volume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ volume: currentVolume })
+          });
+        }
+      </script>
+    <% } else { %>
+      <!-- Sem fila de música ativa no momento -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 mt-8 text-center py-10 space-y-2 shadow-xl">
+        <div class="text-4xl">🎵</div>
+        <h3 class="text-slate-200 font-bold">Nenhuma música tocando agora</h3>
+        <p class="text-xs text-slate-500 max-w-sm mx-auto">Conecte o bot em um canal de voz usando o comando slash <code class="bg-slate-950 px-1.5 py-0.5 rounded text-blue-400">/play</code> no Discord para abrir o reprodutor web.</p>
+      </div>
+    <% } %>
+
   </main>
 
   <footer class="border-t border-slate-900 bg-slate-950/60 py-6 text-center text-xs text-slate-500 mt-auto">
