@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - Quasar</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen">
+  <nav class="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <span class="text-xl font-black text-blue-500 tracking-wider">QUASAR</span>
+      <div class="flex items-center gap-4">
+        <% if (user.email === 'mafiosodashopping@gmail.com') { %>
+          <a href="/admin" class="text-xs font-semibold px-3 py-1.5 bg-amber-500/10 border border-amber-500 text-amber-500 rounded-lg hover:bg-amber-500 hover:text-white transition">Config Global do Bot</a>
+        <% } %>
+        <span class="text-sm text-slate-300"><%= user.username || user.email %></span>
+        <a href="/auth/logout" class="text-xs text-red-400 hover:underline">Sair</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+    <div class="bg-gradient-to-r from-blue-900/30 to-indigo-950/20 border border-blue-900/50 rounded-2xl p-6 mb-8 flex flex-col md:flex-row items-center justify-between">
+      <div>
+        <h2 class="text-2xl font-bold mb-2">Seu Status VIP: 
+          <% if (user.isVip) { %>
+            <span class="text-green-400">ATIVADO 💎</span>
+          <% } else { %>
+            <span class="text-slate-400">CONTA FREE</span>
+          <% } %>
+        </h2>
+        <p class="text-slate-300 text-sm">Libere reprodução de música de alta fidelidade e canais de transmissão de áudio premium no seu bot Quasar.</p>
+      </div>
+      <% if (!user.isVip) { %>
+        <form action="/stripe/checkout" method="POST" class="mt-4 md:mt-0">
+          <button type="submit" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 font-bold rounded-lg shadow-lg shadow-blue-600/20 transition">Assinar VIP Mensal</button>
+        </form>
+      <% } %>
+    </div>
+
+    <h3 class="text-xl font-bold mb-6">Seus Servidores Gerenciáveis</h3>
+    <% if (guilds.length === 0) { %>
+      <p class="text-slate-500 text-sm">Nenhum servidor do Discord localizado com cargo administrativo. Conecte sua conta do Discord para gerenciar.</p>
+    <% } else { %>
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <% guilds.forEach(guild => { %>
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 flex items-center justify-between hover:border-slate-700 transition">
+            <div class="flex items-center gap-4">
+              <% if (guild.icon) { %>
+                <img src="https://cdn.discordapp.com/icons/<%= guild.id %>/<%= guild.icon %>.png" class="w-12 h-12 rounded-full">
+              <% } else { %>
+                <div class="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center font-bold text-slate-300"><%= guild.name.charAt(0) %></div>
+              <% } %>
+              <div>
+                <h4 class="font-bold text-slate-200"><%= guild.name %></h4>
+                <p class="text-xs text-slate-400">ID: <%= guild.id %></p>
+              </div>
+            </div>
+            <button class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold rounded-md border border-slate-700">Gerenciar</button>
+          </div>
+        <% }) %>
+      </div>
+    <% } %>
+  </main>
+</body>
+</html>
