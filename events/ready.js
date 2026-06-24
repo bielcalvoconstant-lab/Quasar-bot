@@ -1,18 +1,38 @@
 const { Events, ActivityType } = require('discord.js');
 const BotSettings = require('../models/BotSettings');
+const fs = require('fs');
+const path = require('path');
 
 module.exports = {
-  // Alterado de 'ready' para Events.ClientReady ('clientReady') para eliminar o aviso de depreciação nos logs
   name: Events.ClientReady,
   once: true,
   async execute(client) {
     console.log(`[QUASAR BOT] Logado com sucesso como ${client.user.tag}`);
 
+    // IMPLANTAÇÃO AUTOMÁTICA DE COMANDOS SLASH (/)
     try {
-      // Busca as configurações globais de presença salvas no banco de dados
-      let settings = await BotSettings.findOne();
+      const commands = [];
+      const commandFolders = fs.readdirSync(path.join(__dirname, '../commands'));
+      for (const folder of commandFolders) {
+        const commandFiles = fs.readdirSync(path.join(__dirname, '../commands', folder)).filter(file => file.endsWith('.js'));
+        for (const file of commandFiles) {
+          const command = require(`../commands/${folder}/${file}`);
+          if ('data' in command && 'execute' in command) {
+            commands.push(command.data.toJSON());
+          }
+        }
+      }
 
-      // Caso não existam configurações salvas ainda, cria o registro padrão no MongoDB
+      // Registra os comandos globalmente
+      await client.application.commands.set(commands);
+      console.log(`[REGISTRO] ${commands.length} comandos slash (/) instalados automaticamente de forma global.`);
+    } catch (err) {
+      console.error('[ERRO REGISTRO COMANDOS]', err);
+    }
+
+    // Carrega status da atividade
+    try {
+      let settings = await BotSettings.findOne();
       if (!settings) {
         settings = await BotSettings.create({
           status: 'online',
@@ -21,7 +41,6 @@ module.exports = {
         });
       }
 
-      // Aplica o status e a atividade recuperados do banco de dados no bot de forma unificada
       client.user.setPresence({
         status: settings.status,
         activities: [{
@@ -31,9 +50,9 @@ module.exports = {
         }]
       });
 
-      console.log('[PRESENÇA] Status e atividade aplicados com sucesso.');
+      console.log('[PRESENÇA] Status e atividade carregados com sucesso.');
     } catch (error) {
-      console.error('[ERRO PRESENÇA] Falha ao carregar as configurações de status do banco de dados:', error);
+      console.error('[ERRO PRESENÇA]', error);
     }
   },
 };
