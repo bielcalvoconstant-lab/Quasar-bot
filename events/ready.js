@@ -1,38 +1,39 @@
-const { ActivityType } = require('discord.js');
+const { Events, ActivityType } = require('discord.js');
 const BotSettings = require('../models/BotSettings');
 
 module.exports = {
-  name: 'ready',
+  // Alterado de 'ready' para Events.ClientReady ('clientReady') para eliminar o aviso de depreciação nos logs
+  name: Events.ClientReady,
   once: true,
   async execute(client) {
     console.log(`[QUASAR BOT] Logado com sucesso como ${client.user.tag}`);
 
     try {
-      // Carrega ou inicializa as configurações padrão do bot
-      let settings = await BotSettings.findOne({ key: 'global_config' });
+      // Busca as configurações globais de presença salvas no banco de dados
+      let settings = await BotSettings.findOne();
+
+      // Caso não existam configurações salvas ainda, cria o registro padrão no MongoDB
       if (!settings) {
-        settings = await BotSettings.create({ key: 'global_config' });
-      }
-
-      // Aplica a presença com base no banco de dados
-      const presenceConfig = {
-        status: settings.status,
-        activities: []
-      };
-
-      if (settings.activityText) {
-        presenceConfig.activities.push({
-          name: settings.activityText,
-          type: ActivityType.Custom,
-          state: `${settings.activityEmoji ? settings.activityEmoji + ' ' : ''}${settings.activityText}`
+        settings = await BotSettings.create({
+          status: 'online',
+          activityEmoji: '💎',
+          activityText: 'Toque músicas de alta definição'
         });
       }
 
-      client.user.setPresence(presenceConfig);
-      console.log('[PRESENÇA] Status e atividade aplicados com sucesso.');
+      // Aplica o status e a atividade recuperados do banco de dados no bot de forma unificada
+      client.user.setPresence({
+        status: settings.status,
+        activities: [{
+          name: 'custom',
+          type: ActivityType.Custom,
+          state: `${settings.activityEmoji} ${settings.activityText}`
+        }]
+      });
 
+      console.log('[PRESENÇA] Status e atividade aplicados com sucesso.');
     } catch (error) {
-      console.error('[ERRO PRESENÇA] Erro ao restaurar configurações do bot:', error);
+      console.error('[ERRO PRESENÇA] Falha ao carregar as configurações de status do banco de dados:', error);
     }
-  }
+  },
 };
