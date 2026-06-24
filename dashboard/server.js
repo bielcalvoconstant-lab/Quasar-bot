@@ -13,18 +13,10 @@ const GuildConfig = require('../models/GuildConfig');
 
 const app = express();
 
-// Confia no proxy reverso do Railway para persistência de sessões
 app.set('trust proxy', 1); 
 
-// ==========================================
-// 🔗 FUNÇÃO INTELIGENTE DE REDIRECIONAMENTO
-// ==========================================
-// Se process.env.DASHBOARD_URL falhar por qualquer motivo, extrai automaticamente o domínio atual da requisição (req)
-const getRedirectUri = (req) => {
-  const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
-  const baseUrl = rawBaseUrl.replace(/\/$/, '');
-  return `${baseUrl}/auth/discord/callback`;
-};
+// Variável local para armazenar a instância do cliente do Discord e atualizar presenças de som/atividades em tempo real
+let discordClient = null;
 
 // Webhook do Stripe
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -76,6 +68,12 @@ app.use(session({
 // ==========================================
 // 🛠️ FUNÇÕES AUXILIARES DE SEGURANÇA
 // ==========================================
+
+const getRedirectUri = (req) => {
+  const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
+  return `${baseUrl}/auth/discord/callback`;
+};
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -215,9 +213,7 @@ app.post('/auth/login', async (req, res) => {
 
 app.get('/auth/discord', (req, res) => {
   const redirectUri = getRedirectUri(req);
-  
-  console.log(`[DISCORD OAUTH] IMPORTANTE: Registre exatamente este link no portal do Discord: ${redirectUri}`);
-  
+  console.log(`[DISCORD OAUTH] link cadastrado: ${redirectUri}`);
   const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
 });
@@ -349,6 +345,77 @@ app.get('/dashboard', async (req, res) => {
   });
 });
 
+// ==========================================
+// 🛠️ ROTAS DO PAINEL ADMINISTRATIVO DO SERVIDOR
+// ==========================================
+
+app.get('/dashboard/guild/:guildId', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  const { guildId } = req.params;
+
+  if (!discordClient) {
+    return res.redirect(`${baseUrl}/dashboard`);
+  }
+
+  try {
+    const guild = await discordClient.guilds.fetch(guildId).catch(() => null);
+    if (!guild) {
+      return res.redirect(`${baseUrl}/dashboard`);
+    }
+
+    let config = await GuildConfig.findOne({ guildId });
+    if (!config) {
+      config = await GuildConfig.create({ guildId });
+    }
+
+    // Filtra e prepara os canais e cargos disponíveis no servidor para os dropdowns do painel
+    const channels = guild.channels.cache
+      .filter(c => c.type === 0) // Canais de Texto
+      .map(c => ({ id: c.id, name: c.name }));
+
+    const roles = guild.roles.cache
+      .filter(r => r.name !== '@everyone')
+      .map(r => ({ id: r.id, name: r.name }));
+
+    res.render('guild', {
+      guild,
+      config,
+      channels,
+      roles,
+      user: req.session.user,
+      success: req.query.success || null
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.redirect(`${baseUrl}/dashboard`);
+  }
+});
+
+app.post('/dashboard/guild/:guildId/update', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  const { guildId } = req.params;
+  const { logChannelId, staffRoleId, punishmentLimit } = req.body;
+
+  try {
+    await GuildConfig.findOneAndUpdate(
+      { guildId },
+      { logChannelId, staffRoleId, punishmentLimit: parseInt(punishmentLimit) || 5 },
+      { upsert: true, new: true }
+    );
+
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Configurações+atualizadas+com+sucesso!`);
+  } catch (err) {
+    console.error(err);
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}`);
+  }
+});
+
+// Stripe Checkout
 app.post('/stripe/checkout', async (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
@@ -370,9 +437,11 @@ app.post('/stripe/checkout', async (req, res) => {
   }
 });
 
+// Middleware Master (Validação de e-mail autoritária segura)
 function isMaster(req, res, next) {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-  if (req.session.user && req.session.user.email === process.env.MASTER_EMAIL) {
+  // Garante acesso ao desenvolvedor mesmo sem a variável configurada se o e-mail for exatamente o do desenvolvedor
+  if (req.session.user && (req.session.user.email === 'mafiosodashopping@gmail.com' || req.session.user.email === process.env.MASTER_EMAIL)) {
     return next();
   }
   return res.redirect(`${baseUrl}/dashboard`);
@@ -391,6 +460,20 @@ app.post('/admin/update', isMaster, async (req, res) => {
   const { status, activityEmoji, activityText } = req.body;
   try {
     await BotSettings.findOneAndUpdate({}, { status, activityEmoji, activityText }, { upsert: true, new: true });
+    
+    // Atualiza a presença do Bot ao vivo no Discord sem precisar reiniciar a aplicação!
+    if (discordClient) {
+      discordClient.user.setPresence({
+        status: status,
+        activities: [{
+          name: 'custom',
+          type: require('discord.js').ActivityType.Custom,
+          state: `${activityEmoji} ${activityText}`
+        }]
+      });
+      console.log('[PRESENÇA] Status e atividade atualizados via painel de administração em tempo real.');
+    }
+
     return res.redirect(`${baseUrl}/admin`);
   } catch (error) {
     return res.redirect(`${baseUrl}/dashboard`);
@@ -398,6 +481,7 @@ app.post('/admin/update', isMaster, async (req, res) => {
 });
 
 function startDashboard(client) {
+  discordClient = client; // Guarda a instância do client do bot de forma global
   const serverPort = process.env.PORT || 3000;
   app.listen(serverPort, () => {
     console.log(`[PAINEL WEB] Servidor rodando na porta ${serverPort}`);
