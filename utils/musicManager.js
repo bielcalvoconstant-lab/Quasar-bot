@@ -36,16 +36,28 @@ function deleteQueue(guildId) {
   }
 }
 
-// Centralização do playSong com filtro preventivo contra URLs inválidas
+// Centralização do playSong com segurança recursiva de eventos
 async function playSong(guildId, song) {
   const queue = queues.get(guildId);
   if (!queue) return;
 
-  // CORREÇÃO: Filtro de segurança contra URLs inválidas ou indefinidas
-  if (!song || !song.url || song.url === 'undefined' || song.url.includes('undefined')) {
+  // 1. PROTEÇÃO DE FIM DE FILA: Se não houver mais músicas, encerra e sai de forma limpa
+  if (!song) {
+    if (!queue.is247) {
+      deleteQueue(guildId);
+    }
+    return;
+  }
+
+  // 2. FILTRO DE URL: Se a música existe mas o link está quebrado, avança para a próxima
+  if (!song.url || song.url === 'undefined' || song.url.includes('undefined')) {
     queue.textChannel.send('⚠️ URL de reprodução corrompida ou inválida detectada. Avançando para a próxima música da fila.');
     queue.songs.shift();
-    playSong(guildId, queue.songs[0]);
+    
+    // O setImmediate libera a call stack do Node, evitando o estouro de memória (RangeError)
+    setImmediate(() => {
+      playSong(guildId, queue.songs[0]);
+    });
     return;
   }
 
@@ -73,9 +85,13 @@ async function playSong(guildId, song) {
 
   } catch (error) {
     console.error('[ERRO STREAMING]', error);
-    queue.textChannel.send(`⚠️ Falha ao transmitir a música **${song.title}**: ${error.message || 'Lentidão temporária do YouTube.'}`);
+    queue.textChannel.send(`⚠️ Falha ao transmitir a música **${song.title}**: ${error.message || 'Conexão interrompida.'}`);
     queue.songs.shift();
-    playSong(guildId, queue.songs[0]);
+    
+    // Libera a pilha de execução em caso de erros consecutivas no stream
+    setImmediate(() => {
+      playSong(guildId, queue.songs[0]);
+    });
   }
 }
 
