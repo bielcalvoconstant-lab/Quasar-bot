@@ -13,10 +13,20 @@ const GuildConfig = require('../models/GuildConfig');
 
 const app = express();
 
+// Confia no proxy reverso do Railway para persistência de sessões
 app.set('trust proxy', 1); 
 
-// Variável local para armazenar a instância do cliente do Discord e atualizar presenças de som/atividades em tempo real
+// Variável local para armazenar a instância do cliente do Discord
 let discordClient = null;
+
+// ==========================================
+// 🔗 FUNÇÃO INTELIGENTE DE REDIRECIONAMENTO
+// ==========================================
+const getRedirectUri = (req) => {
+  const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
+  return `${baseUrl}/auth/discord/callback`;
+};
 
 // Webhook do Stripe
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -69,12 +79,6 @@ app.use(session({
 // 🛠️ FUNÇÕES AUXILIARES DE SEGURANÇA
 // ==========================================
 
-const getRedirectUri = (req) => {
-  const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
-  const baseUrl = rawBaseUrl.replace(/\/$/, '');
-  return `${baseUrl}/auth/discord/callback`;
-};
-
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
@@ -86,10 +90,18 @@ function verifyPassword(password, salt, hash) {
   return verifyHash === hash;
 }
 
+// CORREÇÃO: Função protegida contra variáveis ausentes no Railway
 async function sendBrevoEmail(toEmail, subject, textContent) {
+  const senderEmail = process.env.BREVO_SENDER_EMAIL;
+
+  if (!senderEmail) {
+    console.warn('[AVISO BREVO] O envio de e-mail foi abortado porque a variável BREVO_SENDER_EMAIL não está configurada no Railway.');
+    return;
+  }
+
   try {
     await axios.post('https://api.brevo.com/v3/smtp/email', {
-      sender: { name: "Quasar Bot", email: process.env.BREVO_SENDER_EMAIL },
+      sender: { name: "Quasar Bot", email: senderEmail }, // Envia apenas se estiver definido
       to: [{ email: toEmail }],
       subject: subject,
       textContent: textContent
@@ -213,7 +225,7 @@ app.post('/auth/login', async (req, res) => {
 
 app.get('/auth/discord', (req, res) => {
   const redirectUri = getRedirectUri(req);
-  console.log(`[DISCORD OAUTH] link cadastrado: ${redirectUri}`);
+  console.log(`[DISCORD OAUTH] Link de redirecionamento gerado: ${redirectUri}`);
   const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
 });
@@ -370,9 +382,8 @@ app.get('/dashboard/guild/:guildId', async (req, res) => {
       config = await GuildConfig.create({ guildId });
     }
 
-    // Filtra e prepara os canais e cargos disponíveis no servidor para os dropdowns do painel
     const channels = guild.channels.cache
-      .filter(c => c.type === 0) // Canais de Texto
+      .filter(c => c.type === 0) 
       .map(c => ({ id: c.id, name: c.name }));
 
     const roles = guild.roles.cache
@@ -440,7 +451,6 @@ app.post('/stripe/checkout', async (req, res) => {
 // Middleware Master (Validação de e-mail autoritária segura)
 function isMaster(req, res, next) {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
-  // Garante acesso ao desenvolvedor mesmo sem a variável configurada se o e-mail for exatamente o do desenvolvedor
   if (req.session.user && (req.session.user.email === 'mafiosodashopping@gmail.com' || req.session.user.email === process.env.MASTER_EMAIL)) {
     return next();
   }
@@ -461,7 +471,7 @@ app.post('/admin/update', isMaster, async (req, res) => {
   try {
     await BotSettings.findOneAndUpdate({}, { status, activityEmoji, activityText }, { upsert: true, new: true });
     
-    // Atualiza a presença do Bot ao vivo no Discord sem precisar reiniciar a aplicação!
+    // Atualiza a presença do Bot ao vivo no Discord sem precisar reiniciar
     if (discordClient) {
       discordClient.user.setPresence({
         status: status,
@@ -481,7 +491,7 @@ app.post('/admin/update', isMaster, async (req, res) => {
 });
 
 function startDashboard(client) {
-  discordClient = client; // Guarda a instância do client do bot de forma global
+  discordClient = client; // Guarda a instância do client
   const serverPort = process.env.PORT || 3000;
   app.listen(serverPort, () => {
     console.log(`[PAINEL WEB] Servidor rodando na porta ${serverPort}`);
