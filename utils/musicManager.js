@@ -14,7 +14,7 @@ function createQueue(guildId, textChannel, voiceChannel) {
     connection: null,
     player: null,
     songs: [],
-    volume: 0.5, // Volume inicial (50%)
+    volume: 0.5,
     playing: true,
     is247: false,
   };
@@ -36,15 +36,16 @@ function deleteQueue(guildId) {
   }
 }
 
-// Centralização do playSong para que seja acessível pelo Bot (/play) e pelo Dashboard Web
+// Centralização do playSong com filtro preventivo contra URLs inválidas
 async function playSong(guildId, song) {
   const queue = queues.get(guildId);
   if (!queue) return;
 
-  if (!song) {
-    if (!queue.is247) {
-      deleteQueue(guildId);
-    }
+  // CORREÇÃO: Filtro de segurança contra URLs inválidas ou indefinidas
+  if (!song || !song.url || song.url === 'undefined' || song.url.includes('undefined')) {
+    queue.textChannel.send('⚠️ URL de reprodução corrompida ou inválida detectada. Avançando para a próxima música da fila.');
+    queue.songs.shift();
+    playSong(guildId, queue.songs[0]);
     return;
   }
 
@@ -54,13 +55,11 @@ async function playSong(guildId, song) {
       new Promise((_, reject) => setTimeout(() => reject(new Error('Tempo limite excedido ao obter stream de áudio')), 12000))
     ]);
 
-    // O inlineVolume: true é estritamente necessário para permitir alteração de volume via código/site!
     const resource = createAudioResource(stream.stream, { 
       inputType: stream.type,
       inlineVolume: true 
     });
     
-    // Aplica o volume atualmente configurado na fila
     if (resource.volume) {
       resource.volume.setVolume(queue.volume);
     }
@@ -74,7 +73,7 @@ async function playSong(guildId, song) {
 
   } catch (error) {
     console.error('[ERRO STREAMING]', error);
-    queue.textChannel.send(`⚠️ Falha ao transmitir a música **${song.title}**: ${error.message}`);
+    queue.textChannel.send(`⚠️ Falha ao transmitir a música **${song.title}**: ${error.message || 'Lentidão temporária do YouTube.'}`);
     queue.songs.shift();
     playSong(guildId, queue.songs[0]);
   }
