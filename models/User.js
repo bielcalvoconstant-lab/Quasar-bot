@@ -1,27 +1,17 @@
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
-  email: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
-  passwordHash: { type: String },
-  salt: { type: String },
+  email: { type: String, required: true, unique: true },
+  username: { type: String },
+  passwordHash: { type: String }, // Não obrigatório para que o login do Discord funcione sem erros
+  salt: { type: String },         // Não obrigatório para que o login do Discord funcione sem erros
   isVerified: { type: Boolean, default: false },
-  
-  // Fluxo de verificação e segurança OTP
-  otpCode: { type: String },
+  otp: { type: String },
   otpExpires: { type: Date },
   resetToken: { type: String },
-  resetTokenExpires: { type: Date },
-
-  // Integração com o Discord (OAuth2)
-  discordId: { type: String, unique: true, sparse: true },
-  username: { type: String },
-  avatar: { type: String },
-  accessToken: { type: String },
-
-  // Controle do VIP (Stripe)
   isVip: { type: Boolean, default: false },
-  stripeCustomerId: { type: String },
-  stripeSubscriptionId: { type: String }
+  discordId: { type: String },          // Vinculação automática com ID do Discord
+  discordAccessToken: { type: String }   // Para recuperar dados de servidores
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);
