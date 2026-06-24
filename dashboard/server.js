@@ -17,10 +17,12 @@ const app = express();
 app.set('trust proxy', 1); 
 
 // ==========================================
-// 🔗 FUNÇÃO PARA CONSTRUIR O CALLBACK DINAMICAMENTE
+// 🔗 FUNÇÃO INTELIGENTE DE REDIRECIONAMENTO
 // ==========================================
-const getRedirectUri = () => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+// Se process.env.DASHBOARD_URL falhar por qualquer motivo, extrai automaticamente o domínio atual da requisição (req)
+const getRedirectUri = (req) => {
+  const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
   return `${baseUrl}/auth/discord/callback`;
 };
 
@@ -118,7 +120,7 @@ async function sendLoginAlert(userEmail, req) {
 // ==========================================
 
 app.get('/', (req, res) => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (req.session.user) {
     return res.redirect(`${baseUrl}/dashboard`);
   }
@@ -126,10 +128,9 @@ app.get('/', (req, res) => {
 });
 
 app.get('/auth', (req, res) => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (req.session.user) return res.redirect(`${baseUrl}/dashboard`);
 
-  // Captura o parâmetro de erro enviado via URL (OAuth ou login) para exibir na tela!
   const queryError = req.query.error || null;
   res.render('verify-email', { error: queryError, success: null });
 });
@@ -188,7 +189,7 @@ app.post('/auth/verify-otp', async (req, res) => {
 
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   try {
     const user = await User.findOne({ email });
     if (!user || !user.isVerified) {
@@ -213,9 +214,9 @@ app.post('/auth/login', async (req, res) => {
 });
 
 app.get('/auth/discord', (req, res) => {
-  const redirectUri = getRedirectUri();
+  const redirectUri = getRedirectUri(req);
   
-  console.log(`[DISCORD OAUTH] IMPORTANTE: Copie e cole este link exatamente no painel do Discord: ${redirectUri}`);
+  console.log(`[DISCORD OAUTH] IMPORTANTE: Registre exatamente este link no portal do Discord: ${redirectUri}`);
   
   const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
@@ -223,14 +224,13 @@ app.get('/auth/discord', (req, res) => {
 
 app.get('/auth/discord/callback', async (req, res) => {
   const { code } = req.query;
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   
   if (!code) return res.redirect(`${baseUrl}/auth?error=${encodeURIComponent('Código de autorização ausente.')}`);
 
   try {
-    const redirectUri = getRedirectUri();
+    const redirectUri = getRedirectUri(req);
     
-    // Troca de tokens usando cabeçalho User-Agent obrigatório do Discord e string pura
     const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', 
       new URLSearchParams({
         client_id: process.env.DISCORD_CLIENT_ID,
@@ -242,7 +242,7 @@ app.get('/auth/discord/callback', async (req, res) => {
       {
         headers: { 
           'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)' // Evita bloqueio do Discord API
+          'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)' 
         }
       }
     );
@@ -250,7 +250,6 @@ app.get('/auth/discord/callback', async (req, res) => {
     const accessToken = tokenResponse.data.access_token;
     req.session.accessToken = accessToken;
 
-    // Busca perfil do usuário usando User-Agent obrigatório
     const userResponse = await axios.get('https://discord.com/api/users/@me', {
       headers: { 
         Authorization: `Bearer ${accessToken}`,
@@ -261,7 +260,6 @@ app.get('/auth/discord/callback', async (req, res) => {
     const discordUser = userResponse.data;
     const email = discordUser.email || `${discordUser.id}@discord.quasar`;
 
-    // FLUXO DE VINCULAÇÃO (Se o usuário já está logado por E-mail)
     if (req.session.user) {
       const user = await User.findById(req.session.user._id);
       if (user) {
@@ -278,7 +276,6 @@ app.get('/auth/discord/callback', async (req, res) => {
       });
     }
 
-    // FLUXO DE LOGIN/REGISTRO DIRETO VIA DISCORD
     let user = await User.findOne({ $or: [{ discordId: discordUser.id }, { email }] });
     if (!user) {
       user = await User.create({
@@ -304,23 +301,20 @@ app.get('/auth/discord/callback', async (req, res) => {
 
   } catch (error) {
     console.error('[ERRO OAUTH2 DETALHADO]', error.response ? error.response.data : error.message);
-    
-    // Captura o motivo exato retornado do Discord ou do banco de dados para mostrar na tela
     const detailedMsg = error.response?.data?.error_description || error.response?.data?.error || error.message || 'Erro inesperado na autenticação.';
-    
     return res.redirect(`${baseUrl}/auth?error=${encodeURIComponent(`Erro de Autenticação: ${detailedMsg}`)}`);
   }
 });
 
 app.get('/auth/logout', (req, res) => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   req.session.destroy(() => {
     res.redirect(`${baseUrl}/auth`);
   });
 });
 
 app.get('/dashboard', async (req, res) => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
 
   let adminGuilds = [];
@@ -356,7 +350,7 @@ app.get('/dashboard', async (req, res) => {
 });
 
 app.post('/stripe/checkout', async (req, res) => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
 
   try {
@@ -377,7 +371,7 @@ app.post('/stripe/checkout', async (req, res) => {
 });
 
 function isMaster(req, res, next) {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (req.session.user && req.session.user.email === process.env.MASTER_EMAIL) {
     return next();
   }
@@ -393,7 +387,7 @@ app.get('/admin', isMaster, async (req, res) => {
 });
 
 app.post('/admin/update', isMaster, async (req, res) => {
-  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   const { status, activityEmoji, activityText } = req.body;
   try {
     await BotSettings.findOneAndUpdate({}, { status, activityEmoji, activityText }, { upsert: true, new: true });
