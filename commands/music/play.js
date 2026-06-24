@@ -48,7 +48,7 @@ module.exports = {
 
     try {
       let ytInfo = null;
-      let finalUrl = null; // Garante que a URL final seja sempre salva e nunca fique undefined
+      let finalUrl = null; 
       const isSpotify = play.sp_validate(query);
 
       // CONVERSÃO DE SPOTIFY PARA YOUTUBE
@@ -65,7 +65,9 @@ module.exports = {
             if (!searchResults || searchResults.length === 0) {
               return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no YouTube para essa música do Spotify.' });
             }
-            finalUrl = searchResults[0].url; // Captura a URL real do vídeo do YouTube retornado pela busca
+            
+            // CORREÇÃO: Garante a extração da URL ou ID forçado se a propriedade url estiver nula
+            finalUrl = searchResults[0].url || `https://www.youtube.com/watch?v=${searchResults[0].id}`;
             ytInfo = await withTimeout(
               play.video_info(finalUrl),
               8000,
@@ -79,7 +81,7 @@ module.exports = {
           return interaction.editReply({ content: 'Falha ao processar o link do Spotify. Verifique se a música é pública.' });
         }
       } else if (play.yt_validate(query) === 'video') {
-        finalUrl = query; // Link direto do YouTube enviado pelo usuário
+        finalUrl = query; // Usa o link do YouTube digitado diretamente
         ytInfo = await withTimeout(
           play.video_info(query),
           8000,
@@ -97,7 +99,8 @@ module.exports = {
           return interaction.editReply({ content: 'Nenhum resultado de música correspondente foi encontrado.' });
         }
         
-        finalUrl = searchResults[0].url; // Captura a URL do primeiro vídeo retornado pela busca de texto
+        // CORREÇÃO: Garante a extração da URL ou ID se a propriedade url estiver vazia no play-dl
+        finalUrl = searchResults[0].url || `https://www.youtube.com/watch?v=${searchResults[0].id}`;
         ytInfo = await withTimeout(
           play.video_info(finalUrl),
           8000,
@@ -105,7 +108,11 @@ module.exports = {
         );
       }
 
-      // CORREÇÃO: Usamos a finalUrl que está 100% preenchida com um link do YouTube válido
+      // Validação final da URL para lançar erro amigável caso de fato fique nulo
+      if (!finalUrl || finalUrl.includes('undefined')) {
+        throw new Error('Não foi possível obter uma URL de reprodução válida para o vídeo do YouTube.');
+      }
+
       const song = {
         title: ytInfo.video_details.title,
         url: finalUrl, 
