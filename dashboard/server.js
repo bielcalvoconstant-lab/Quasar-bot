@@ -13,8 +13,19 @@ const GuildConfig = require('../models/GuildConfig');
 
 const app = express();
 
+// Confia no proxy reverso do Railway para persistência de sessões
 app.set('trust proxy', 1); 
 
+// ==========================================
+// 🔗 FUNÇÃO PARA CONSTRUIR O CALLBACK DINAMICAMENTE
+// ==========================================
+const getRedirectUri = () => {
+  // Remove qualquer barra "/" do final da URL para evitar caminhos duplicados
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  return `${baseUrl}/auth/discord/callback`;
+};
+
+// Middleware para processar Webhook do Stripe com corpo bruto (obrigatoriamente antes do express.json)
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -61,6 +72,10 @@ app.use(session({
   }
 }));
 
+// ==========================================
+// 🛠️ FUNÇÕES AUXILIARES DE SEGURANÇA
+// ==========================================
+
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
@@ -99,13 +114,21 @@ async function sendLoginAlert(userEmail, req) {
   await sendBrevoEmail(userEmail, "⚠️ Alerta de Segurança: Novo Login", text);
 }
 
+// ==========================================
+// 🛣️ ROTAS DO SISTEMA
+// ==========================================
+
 app.get('/', (req, res) => {
-  if (req.session.user) return res.redirect('/dashboard');
-  return res.redirect('/auth');
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  if (req.session.user) {
+    return res.redirect(`${baseUrl}/dashboard`);
+  }
+  return res.redirect(`${baseUrl}/auth`);
 });
 
 app.get('/auth', (req, res) => {
-  if (req.session.user) return res.redirect('/dashboard');
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  if (req.session.user) return res.redirect(`${baseUrl}/dashboard`);
   res.render('verify-email', { error: null, success: null });
 });
 
@@ -163,6 +186,7 @@ app.post('/auth/verify-otp', async (req, res) => {
 
 app.post('/auth/login', async (req, res) => {
   const { email, password } = req.body;
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   try {
     const user = await User.findOne({ email });
     if (!user || !user.isVerified) {
@@ -176,29 +200,34 @@ app.post('/auth/login', async (req, res) => {
 
     req.session.user = user;
     sendLoginAlert(user.email, req).catch(err => console.error(err));
-    return res.redirect('/dashboard');
+    return res.redirect(`${baseUrl}/dashboard`);
   } catch (error) {
     return res.render('verify-email', { error: 'Erro interno.', success: null });
   }
 });
 
 app.get('/auth/discord', (req, res) => {
-  // Configura a URL de Autorização usando a variável de ambiente segura DISCORD_REDIRECT_URI
-  const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20email%20guilds`;
+  const redirectUri = getRedirectUri();
+  const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
 });
 
 app.get('/auth/discord/callback', async (req, res) => {
   const { code } = req.query;
-  if (!code) return res.redirect('/auth');
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  
+  if (!code) return res.redirect(`${baseUrl}/auth`);
 
   try {
+    const redirectUri = getRedirectUri();
+    
+    // Efetua a troca de código utilizando a URI de redirecionamento idêntica gerada por getRedirectUri()
     const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
       client_id: process.env.DISCORD_CLIENT_ID,
       client_secret: process.env.DISCORD_CLIENT_SECRET,
       grant_type: 'authorization_code',
       code,
-      redirect_uri: process.env.DISCORD_REDIRECT_URI,
+      redirect_uri: redirectUri,
     }), {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
@@ -222,7 +251,7 @@ app.get('/auth/discord/callback', async (req, res) => {
         await user.save();
         req.session.user = user;
       }
-      return res.redirect('/dashboard');
+      return res.redirect(`${baseUrl}/dashboard`);
     }
 
     let user = await User.findOne({ $or: [{ discordId: discordUser.id }, { email }] });
@@ -242,20 +271,22 @@ app.get('/auth/discord/callback', async (req, res) => {
     }
 
     req.session.user = user;
-    return res.redirect('/dashboard');
+    return res.redirect(`${baseUrl}/dashboard`);
   } catch (error) {
     console.error('[ERRO OAUTH2 DETALHADO]', error.response ? error.response.data : error.message);
-    return res.redirect('/auth');
+    return res.redirect(`${baseUrl}/auth`);
   }
 });
 
 app.get('/auth/logout', (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   req.session.destroy();
-  res.redirect('/auth');
+  res.redirect(`${baseUrl}/auth`);
 });
 
 app.get('/dashboard', async (req, res) => {
-  if (!req.session.user) return res.redirect('/auth');
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
 
   let adminGuilds = [];
   let token = req.session.accessToken;
@@ -282,15 +313,13 @@ app.get('/dashboard', async (req, res) => {
     user: req.session.user, 
     guilds: adminGuilds, 
     hasDiscordLinked: !!token,
-    dashboardUrl: process.env.DASHBOARD_URL || `http://localhost:${process.env.PORT || 3000}`
+    dashboardUrl: baseUrl
   });
 });
 
 app.post('/stripe/checkout', async (req, res) => {
-  if (!req.session.user) return res.redirect('/auth');
-
-  // Utiliza a URL base confiável configurada no painel do Railway
-  const baseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
 
   try {
     const sessionCheckout = await stripe.checkout.sessions.create({
@@ -305,15 +334,16 @@ app.post('/stripe/checkout', async (req, res) => {
     res.redirect(303, sessionCheckout.url);
   } catch (error) {
     console.error('[ERRO CHECKOUT]', error.message);
-    res.redirect('/dashboard');
+    res.redirect(`${baseUrl}/dashboard`);
   }
 });
 
 function isMaster(req, res, next) {
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   if (req.session.user && req.session.user.email === process.env.MASTER_EMAIL) {
     return next();
   }
-  return res.redirect('/dashboard');
+  return res.redirect(`${baseUrl}/dashboard`);
 }
 
 app.get('/admin', isMaster, async (req, res) => {
@@ -325,12 +355,13 @@ app.get('/admin', isMaster, async (req, res) => {
 });
 
 app.post('/admin/update', isMaster, async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   const { status, activityEmoji, activityText } = req.body;
   try {
     await BotSettings.findOneAndUpdate({}, { status, activityEmoji, activityText }, { upsert: true, new: true });
-    return res.redirect('/admin');
+    return res.redirect(`${baseUrl}/admin`);
   } catch (error) {
-    return res.redirect('/dashboard');
+    return res.redirect(`${baseUrl}/dashboard`);
   }
 });
 
