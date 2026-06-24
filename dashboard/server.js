@@ -128,7 +128,10 @@ app.get('/', (req, res) => {
 app.get('/auth', (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   if (req.session.user) return res.redirect(`${baseUrl}/dashboard`);
-  res.render('verify-email', { error: null, success: null });
+
+  // Captura o parâmetro de erro enviado via URL (OAuth ou login) para exibir na tela!
+  const queryError = req.query.error || null;
+  res.render('verify-email', { error: queryError, success: null });
 });
 
 app.post('/auth/register', async (req, res) => {
@@ -199,7 +202,6 @@ app.post('/auth/login', async (req, res) => {
 
     req.session.user = user;
     
-    // CORREÇÃO CRUCIAL: Salva a sessão no MongoDB antes de efetuar o redirecionamento
     req.session.save((err) => {
       if (err) console.error('[ERRO SALVAR SESSÃO LOGOUT/LOGIN]', err);
       sendLoginAlert(user.email, req).catch(err => console.error(err));
@@ -213,7 +215,6 @@ app.post('/auth/login', async (req, res) => {
 app.get('/auth/discord', (req, res) => {
   const redirectUri = getRedirectUri();
   
-  // Imprime no log do Railway a URL exata gerada para facilitar a cópia para o portal do desenvolvedor do Discord
   console.log(`[DISCORD OAUTH] IMPORTANTE: Copie e cole este link exatamente no painel do Discord: ${redirectUri}`);
   
   const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
@@ -224,31 +225,43 @@ app.get('/auth/discord/callback', async (req, res) => {
   const { code } = req.query;
   const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   
-  if (!code) return res.redirect(`${baseUrl}/auth`);
+  if (!code) return res.redirect(`${baseUrl}/auth?error=${encodeURIComponent('Código de autorização ausente.')}`);
 
   try {
     const redirectUri = getRedirectUri();
     
-    const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
-      client_id: process.env.DISCORD_CLIENT_ID,
-      client_secret: process.env.DISCORD_CLIENT_SECRET,
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri,
-    }), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
+    // Troca de tokens usando cabeçalho User-Agent obrigatório do Discord e string pura
+    const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', 
+      new URLSearchParams({
+        client_id: process.env.DISCORD_CLIENT_ID,
+        client_secret: process.env.DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+      }).toString(), 
+      {
+        headers: { 
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)' // Evita bloqueio do Discord API
+        }
+      }
+    );
 
     const accessToken = tokenResponse.data.access_token;
     req.session.accessToken = accessToken;
 
+    // Busca perfil do usuário usando User-Agent obrigatório
     const userResponse = await axios.get('https://discord.com/api/users/@me', {
-      headers: { Authorization: `Bearer ${accessToken}` }
+      headers: { 
+        Authorization: `Bearer ${accessToken}`,
+        'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)'
+      }
     });
 
     const discordUser = userResponse.data;
     const email = discordUser.email || `${discordUser.id}@discord.quasar`;
 
+    // FLUXO DE VINCULAÇÃO (Se o usuário já está logado por E-mail)
     if (req.session.user) {
       const user = await User.findById(req.session.user._id);
       if (user) {
@@ -265,6 +278,7 @@ app.get('/auth/discord/callback', async (req, res) => {
       });
     }
 
+    // FLUXO DE LOGIN/REGISTRO DIRETO VIA DISCORD
     let user = await User.findOne({ $or: [{ discordId: discordUser.id }, { email }] });
     if (!user) {
       user = await User.create({
@@ -283,7 +297,6 @@ app.get('/auth/discord/callback', async (req, res) => {
 
     req.session.user = user;
     
-    // CORREÇÃO CRUCIAL: Garante a persistência dos cookies de sessão antes de enviar o redirecionamento
     req.session.save((err) => {
       if (err) console.error(err);
       return res.redirect(`${baseUrl}/dashboard`);
@@ -291,7 +304,11 @@ app.get('/auth/discord/callback', async (req, res) => {
 
   } catch (error) {
     console.error('[ERRO OAUTH2 DETALHADO]', error.response ? error.response.data : error.message);
-    return res.redirect(`${baseUrl}/auth`);
+    
+    // Captura o motivo exato retornado do Discord ou do banco de dados para mostrar na tela
+    const detailedMsg = error.response?.data?.error_description || error.response?.data?.error || error.message || 'Erro inesperado na autenticação.';
+    
+    return res.redirect(`${baseUrl}/auth?error=${encodeURIComponent(`Erro de Autenticação: ${detailedMsg}`)}`);
   }
 });
 
@@ -319,7 +336,10 @@ app.get('/dashboard', async (req, res) => {
   if (token) {
     try {
       const guildsResponse = await axios.get('https://discord.com/api/users/@me/guilds', {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)'
+        }
       });
       adminGuilds = guildsResponse.data.filter(g => g.owner || (parseInt(g.permissions) & 0x8) === 0x8);
     } catch (error) {
