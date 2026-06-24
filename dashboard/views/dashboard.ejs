@@ -71,14 +71,15 @@
                 <p class="text-xs text-slate-400">ID: <%= guild.id %></p>
               </div>
             </div>
-            <button class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold rounded-md border border-slate-700">Gerenciar</button>
+            <!-- CORREÇÃO: Link direcionando dinamicamente para o painel de gerenciamento do servidor -->
+            <a href="/dashboard/guild/<%= guild.id %>" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-semibold rounded-md border border-slate-700 text-center">Gerenciar</a>
           </div>
         <% }) %>
       </div>
     <% } %>
   </main>
 
-  <!-- Rodapé discreto com link para o bot de ticket (Krypton Bot) -->
+  <!-- Rodapé discreto -->
   <footer class="border-t border-slate-900 bg-slate-950/60 backdrop-blur-sm mt-auto">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
       <p>© 2026 Quasar Bot. Todos os direitos reservados.</p>
