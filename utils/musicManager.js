@@ -36,12 +36,12 @@ function deleteQueue(guildId) {
   }
 }
 
-// Centralização do playSong com segurança recursiva de eventos
+// Centralização do playSong com segurança recursiva de eventos e diagnóstico de cookies do YouTube
 async function playSong(guildId, song) {
   const queue = queues.get(guildId);
   if (!queue) return;
 
-  // 1. PROTEÇÃO DE FIM DE FILA: Se não houver mais músicas, encerra e sai de forma limpa
+  // 1. PROTEÇÃO DE FIM DE FILA: Se não houver mais músicas, encerra de forma limpa
   if (!song) {
     if (!queue.is247) {
       deleteQueue(guildId);
@@ -49,12 +49,11 @@ async function playSong(guildId, song) {
     return;
   }
 
-  // 2. FILTRO DE URL: Se a música existe mas o link está quebrado, avança para a próxima
+  // 2. FILTRO DE URL: Se a música possui um link inválido de origem, avança para a próxima
   if (!song.url || song.url === 'undefined' || song.url.includes('undefined')) {
-    queue.textChannel.send('⚠️ URL de reprodução corrompida ou inválida detectada. Avançando para a próxima música da fila.');
+    queue.textChannel.send('⚠️ URL de reprodução inválida detectada. Avançando para a próxima música da fila.');
     queue.songs.shift();
     
-    // O setImmediate libera a call stack do Node, evitando o estouro de memória (RangeError)
     setImmediate(() => {
       playSong(guildId, queue.songs[0]);
     });
@@ -85,7 +84,15 @@ async function playSong(guildId, song) {
 
   } catch (error) {
     console.error('[ERRO STREAMING]', error);
-    queue.textChannel.send(`⚠️ Falha ao transmitir a música **${song.title}**: ${error.message || 'Conexão interrompida.'}`);
+
+    let userFriendlyMsg = error.message || 'Conexão interrompida.';
+
+    // DIAGNÓSTICO DO COOKIE DO YOUTUBE: Se o erro for de URL inválida interna do play-dl
+    if (error.code === 'ERR_INVALID_URL' || error.message?.includes('Invalid URL')) {
+      userFriendlyMsg = 'O `YOUTUBE_COOKIE` configurado no Railway está expirado, incompleto ou no formato incorreto. Por favor, exporte novamente o cookie do YouTube logado como **"Header String"** no Cookie-Editor e recadastre no Railway.';
+    }
+
+    queue.textChannel.send(`⚠️ Falha ao transmitir a música **${song.title}**: ${userFriendlyMsg}`);
     queue.songs.shift();
     
     // Libera a pilha de execução em caso de erros consecutivas no stream
