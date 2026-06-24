@@ -13,6 +13,8 @@ const GuildConfig = require('../models/GuildConfig');
 
 const app = express();
 
+app.set('trust proxy', 1); 
+
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -47,13 +49,15 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'chave_secreta_reserva_quasar_123',
   resave: false,
   saveUninitialized: false,
+  proxy: true,
   store: MongoStore.create({
     clientPromise: mongoose.connection.asPromise().then(conn => conn.getClient()),
     ttl: 30 * 24 * 60 * 60
   }),
   cookie: {
     maxAge: 30 * 24 * 60 * 60 * 1000,
-    secure: false
+    secure: false,
+    httpOnly: true
   }
 }));
 
@@ -178,8 +182,8 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// URL OAuth2 com escopo de email obrigatório
 app.get('/auth/discord', (req, res) => {
+  // Configura a URL de Autorização usando a variável de ambiente segura DISCORD_REDIRECT_URI
   const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.DISCORD_REDIRECT_URI)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
 });
@@ -209,7 +213,6 @@ app.get('/auth/discord/callback', async (req, res) => {
     const discordUser = userResponse.data;
     const email = discordUser.email || `${discordUser.id}@discord.quasar`;
 
-    // Se o usuário já estiver logado via E-mail, este callback vincula a conta do Discord dele!
     if (req.session.user) {
       const user = await User.findById(req.session.user._id);
       if (user) {
@@ -222,7 +225,6 @@ app.get('/auth/discord/callback', async (req, res) => {
       return res.redirect('/dashboard');
     }
 
-    // Login Direto / Registro automático via Discord
     let user = await User.findOne({ $or: [{ discordId: discordUser.id }, { email }] });
     if (!user) {
       user = await User.create({
@@ -242,7 +244,7 @@ app.get('/auth/discord/callback', async (req, res) => {
     req.session.user = user;
     return res.redirect('/dashboard');
   } catch (error) {
-    console.error('[ERRO OAUTH2]', error.response ? error.response.data : error.message);
+    console.error('[ERRO OAUTH2 DETALHADO]', error.response ? error.response.data : error.message);
     return res.redirect('/auth');
   }
 });
@@ -258,7 +260,6 @@ app.get('/dashboard', async (req, res) => {
   let adminGuilds = [];
   let token = req.session.accessToken;
 
-  // Busca o token do banco se tiver feito login por e-mail e possuir o Discord vinculado
   if (!token) {
     const userDb = await User.findById(req.session.user._id);
     if (userDb && userDb.discordAccessToken) {
@@ -280,25 +281,30 @@ app.get('/dashboard', async (req, res) => {
   res.render('dashboard', { 
     user: req.session.user, 
     guilds: adminGuilds, 
-    hasDiscordLinked: !!token 
+    hasDiscordLinked: !!token,
+    dashboardUrl: process.env.DASHBOARD_URL || `http://localhost:${process.env.PORT || 3000}`
   });
 });
 
 app.post('/stripe/checkout', async (req, res) => {
   if (!req.session.user) return res.redirect('/auth');
 
+  // Utiliza a URL base confiável configurada no painel do Railway
+  const baseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
+
   try {
     const sessionCheckout = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
       mode: 'subscription',
-      success_url: `${req.protocol}://${req.get('host')}/dashboard`,
-      cancel_url: `${req.protocol}://${req.get('host')}/dashboard`,
+      success_url: `${baseUrl}/dashboard`,
+      cancel_url: `${baseUrl}/dashboard`,
       client_reference_id: req.session.user._id.toString()
     });
 
     res.redirect(303, sessionCheckout.url);
   } catch (error) {
+    console.error('[ERRO CHECKOUT]', error.message);
     res.redirect('/dashboard');
   }
 });
