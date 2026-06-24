@@ -1,5 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, AudioPlayerStatus } = require('@discordjs/voice');
+const { joinVoiceChannel, createAudioPlayer } = require('@discordjs/voice');
 const play = require('play-dl');
 const User = require('../../models/User');
 const { queues, createQueue, playSong } = require('../../utils/musicManager');
@@ -47,10 +47,11 @@ module.exports = {
     const query = options.getString('busca');
 
     try {
-      let ytInfo;
+      let ytInfo = null;
+      let finalUrl = null; // Garante que a URL final seja sempre salva e nunca fique undefined
       const isSpotify = play.sp_validate(query);
 
-      // CONVERSÃO INTELIGENTE DE SPOTIFY PARA YOUTUBE
+      // CONVERSÃO DE SPOTIFY PARA YOUTUBE
       if (isSpotify && isSpotify !== 'search') {
         try {
           const spotifyData = await play.spotify(query);
@@ -64,8 +65,9 @@ module.exports = {
             if (!searchResults || searchResults.length === 0) {
               return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no YouTube para essa música do Spotify.' });
             }
+            finalUrl = searchResults[0].url; // Captura a URL real do vídeo do YouTube retornado pela busca
             ytInfo = await withTimeout(
-              play.video_info(searchResults[0].url),
+              play.video_info(finalUrl),
               8000,
               'Tempo limite excedido ao carregar os dados do YouTube para a faixa do Spotify.'
             );
@@ -77,12 +79,14 @@ module.exports = {
           return interaction.editReply({ content: 'Falha ao processar o link do Spotify. Verifique se a música é pública.' });
         }
       } else if (play.yt_validate(query) === 'video') {
+        finalUrl = query; // Link direto do YouTube enviado pelo usuário
         ytInfo = await withTimeout(
           play.video_info(query),
           8000,
           'O servidor do YouTube demorou muito para responder a este link.'
         );
       } else {
+        // Busca de texto do YouTube
         const searchResults = await withTimeout(
           play.search(query, { limit: 1 }),
           8000,
@@ -93,17 +97,18 @@ module.exports = {
           return interaction.editReply({ content: 'Nenhum resultado de música correspondente foi encontrado.' });
         }
         
+        finalUrl = searchResults[0].url; // Captura a URL do primeiro vídeo retornado pela busca de texto
         ytInfo = await withTimeout(
-          play.video_info(searchResults[0].url),
+          play.video_info(finalUrl),
           8000,
           'Falha ao obter metadados da música selecionada.'
         );
       }
 
-      // CORREÇÃO: Constrói a URL usando estritamente o id do vídeo para evitar erros de URL inválida
+      // CORREÇÃO: Usamos a finalUrl que está 100% preenchida com um link do YouTube válido
       const song = {
         title: ytInfo.video_details.title,
-        url: `https://www.youtube.com/watch?v=${ytInfo.video_details.id}`, 
+        url: finalUrl, 
         duration: ytInfo.video_details.durationRaw,
         thumbnail: ytInfo.video_details.thumbnails[0]?.url || ''
       };
