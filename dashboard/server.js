@@ -20,12 +20,11 @@ app.set('trust proxy', 1);
 // 🔗 FUNÇÃO PARA CONSTRUIR O CALLBACK DINAMICAMENTE
 // ==========================================
 const getRedirectUri = () => {
-  // Remove qualquer barra "/" do final da URL para evitar caminhos duplicados
   const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
   return `${baseUrl}/auth/discord/callback`;
 };
 
-// Middleware para processar Webhook do Stripe com corpo bruto (obrigatoriamente antes do express.json)
+// Webhook do Stripe
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -67,7 +66,7 @@ app.use(session({
   }),
   cookie: {
     maxAge: 30 * 24 * 60 * 60 * 1000,
-    secure: false,
+    secure: false, 
     httpOnly: true
   }
 }));
@@ -199,8 +198,13 @@ app.post('/auth/login', async (req, res) => {
     }
 
     req.session.user = user;
-    sendLoginAlert(user.email, req).catch(err => console.error(err));
-    return res.redirect(`${baseUrl}/dashboard`);
+    
+    // CORREÇÃO CRUCIAL: Salva a sessão no MongoDB antes de efetuar o redirecionamento
+    req.session.save((err) => {
+      if (err) console.error('[ERRO SALVAR SESSÃO LOGOUT/LOGIN]', err);
+      sendLoginAlert(user.email, req).catch(err => console.error(err));
+      return res.redirect(`${baseUrl}/dashboard`);
+    });
   } catch (error) {
     return res.render('verify-email', { error: 'Erro interno.', success: null });
   }
@@ -208,6 +212,10 @@ app.post('/auth/login', async (req, res) => {
 
 app.get('/auth/discord', (req, res) => {
   const redirectUri = getRedirectUri();
+  
+  // Imprime no log do Railway a URL exata gerada para facilitar a cópia para o portal do desenvolvedor do Discord
+  console.log(`[DISCORD OAUTH] IMPORTANTE: Copie e cole este link exatamente no painel do Discord: ${redirectUri}`);
+  
   const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
   res.redirect(authorizeUrl);
 });
@@ -221,7 +229,6 @@ app.get('/auth/discord/callback', async (req, res) => {
   try {
     const redirectUri = getRedirectUri();
     
-    // Efetua a troca de código utilizando a URI de redirecionamento idêntica gerada por getRedirectUri()
     const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', new URLSearchParams({
       client_id: process.env.DISCORD_CLIENT_ID,
       client_secret: process.env.DISCORD_CLIENT_SECRET,
@@ -251,7 +258,11 @@ app.get('/auth/discord/callback', async (req, res) => {
         await user.save();
         req.session.user = user;
       }
-      return res.redirect(`${baseUrl}/dashboard`);
+      
+      return req.session.save((err) => {
+        if (err) console.error(err);
+        return res.redirect(`${baseUrl}/dashboard`);
+      });
     }
 
     let user = await User.findOne({ $or: [{ discordId: discordUser.id }, { email }] });
@@ -271,7 +282,13 @@ app.get('/auth/discord/callback', async (req, res) => {
     }
 
     req.session.user = user;
-    return res.redirect(`${baseUrl}/dashboard`);
+    
+    // CORREÇÃO CRUCIAL: Garante a persistência dos cookies de sessão antes de enviar o redirecionamento
+    req.session.save((err) => {
+      if (err) console.error(err);
+      return res.redirect(`${baseUrl}/dashboard`);
+    });
+
   } catch (error) {
     console.error('[ERRO OAUTH2 DETALHADO]', error.response ? error.response.data : error.message);
     return res.redirect(`${baseUrl}/auth`);
@@ -280,8 +297,9 @@ app.get('/auth/discord/callback', async (req, res) => {
 
 app.get('/auth/logout', (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || 'http://localhost:3000').replace(/\/$/, '');
-  req.session.destroy();
-  res.redirect(`${baseUrl}/auth`);
+  req.session.destroy(() => {
+    res.redirect(`${baseUrl}/auth`);
+  });
 });
 
 app.get('/dashboard', async (req, res) => {
