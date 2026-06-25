@@ -14,13 +14,16 @@ module.exports = {
     // 🎫 CONFIGURAÇÃO DE BYPASS DO SOUNDCLOUD (EXCLUSIVO)
     // ==========================================
     try {
-      // Injeta a chave pública ativa do SoundCloud mundial para garantir transmissões estáveis no Railway
+      // CORREÇÃO: Utiliza a chave ativa de 2026 'vjvE4M9RytEg9W09NH1ge2VyrZPUSKo5' como fallback principal
+      const scClientId = process.env.SOUNDCLOUD_CLIENT_ID || 'vjvE4M9RytEg9W09NH1ge2VyrZPUSKo5';
+      
       await play.setToken({
         soundcloud: {
-          client_id: process.env.SOUNDCLOUD_CLIENT_ID || 'qMNlQ19f7XBPO8xzq12CnSEiq2zGWrlJ'
+          client_id: scClientId
         }
       });
-      console.log('[PLAY-DL] Token do SoundCloud configurado com sucesso. Motor de busca ativo.');
+      
+      console.log(`[PLAY-DL] Token do SoundCloud configurado com sucesso. ID ativo: "${scClientId.substring(0, 8)}..."`);
     } catch (scErr) {
       console.error('[PLAY-DL ERRO] Falha ao injetar token do SoundCloud:', scErr.message);
     }
