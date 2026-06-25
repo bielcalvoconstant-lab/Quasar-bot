@@ -142,14 +142,18 @@
       </div>
 
       <script>
-        // Envia as ordens de ações (pause, resume, skip, stop, toggle247) para o Express
+        // CORREÇÃO: sendControl atualizado com delay de 800ms para aguardar a sincronização do servidor
         async function sendControl(action) {
           await fetch('/dashboard/guild/<%= guild.id %>/music/control', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ action })
           });
-          location.reload();
+          
+          // Aguarda o processamento assíncrono do servidor antes de atualizar a tela EJS
+          setTimeout(() => {
+            location.reload();
+          }, 800);
         }
 
         // Envia a atualização de volume de forma dinâmica
