@@ -11,10 +11,10 @@ function withTimeout(promise, ms, errorMessage = 'Tempo limite excedido na requi
   return Promise.race([promise, timeout]);
 }
 
-// CORREÇÃO: Formata a duração retornada pelo SoundCloud com proteção contra valores vazios/nulos
+// Converte a duração de milissegundos para formatação legível (mm:ss)
 function formatDuration(duration) {
   if (typeof duration === 'string') return duration;
-  if (!duration || isNaN(duration)) return '3:30'; // Fallback padrão amigável caso o SoundCloud retorne nulo
+  if (!duration || isNaN(duration)) return '3:30'; 
   
   const totalSeconds = Math.floor(duration / 1000);
   const seconds = totalSeconds % 60;
@@ -143,11 +143,16 @@ async function handlePlay(interaction, guild, voiceChannel, song) {
 
   if (!serverQueue) {
     serverQueue = createQueue(guild.id, interaction.channel, voiceChannel);
+    
+    // CORREÇÃO: Propriedades selfDeaf e selfMute aplicadas de forma explícita
     const connection = joinVoiceChannel({
       channelId: voiceChannel.id,
       guildId: guild.id,
       adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: true,  // Ensurdece o bot para economizar largura de banda e estabilizar sinalização
+      selfMute: false
     });
+    
     const player = createAudioPlayer();
     serverQueue.connection = connection;
     serverQueue.player = player;
@@ -225,10 +230,13 @@ async function renderSelectionMenu(interaction, guild, voiceChannel, searchResul
     if (!serverQueue) {
       serverQueue = createQueue(guild.id, interaction.channel, voiceChannel);
 
+      // CORREÇÃO: Propriedades selfDeaf e selfMute aplicadas no menu de seleção também
       const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
         guildId: guild.id,
         adapterCreator: guild.voiceAdapterCreator,
+        selfDeaf: true,
+        selfMute: false
       });
 
       const player = createAudioPlayer();
