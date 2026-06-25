@@ -1,57 +1,87 @@
+// index.js
 require('dotenv').config();
 const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
+const { startDashboard } = require('./dashboard/server');
 
-// Inicialização do cliente Discord
+// Inicialização do Client do Discord com as intenções de música e moderação
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
   ]
 });
 
+// Coleção para armazenar os comandos slash
 client.commands = new Collection();
 
-// Conectando ao Banco de Dados MongoDB de forma segura
-mongoose.connect(process.env.MONGO_URI, {
-  bufferCommands: false,
-})
-.then(() => console.log('[BANCO DE DADOS] Conectado ao MongoDB.'))
-.catch(err => console.error('[BANCO DE DADOS] Erro de conexão:', err));
-
-// Carregando comandos modularizados
+// ==========================================
+// 📥 CARREGAMENTO ROBUSTO DE COMANDOS SLASH
+// ==========================================
 const commandFolders = fs.readdirSync(path.join(__dirname, 'commands'));
 for (const folder of commandFolders) {
-  const commandFiles = fs.readdirSync(path.join(__dirname, 'commands', folder)).filter(file => file.endsWith('.js'));
+  const folderPath = path.join(__dirname, 'commands', folder);
+  const commandFiles = fs.readdirSync(folderPath).filter(file => file.endsWith('.js'));
+  
   for (const file of commandFiles) {
-    const command = require(`./commands/${folder}/${file}`);
-    client.commands.set(command.data.name, command);
+    const filePath = path.join(folderPath, file);
+    try {
+      const command = require(filePath);
+      
+      // CORREÇÃO: Validação de segurança recomendada pela documentação oficial do Discord.js v14
+      if (command && 'data' in command && 'execute' in command && command.data && command.data.name) {
+        client.commands.set(command.data.name, command);
+      } else {
+        // Se o arquivo for inválido ou de backup, exibe um aviso limpo no console em vez de derrubar o bot
+        console.warn(`[AVISO COMANDO] O arquivo "${file}" em "commands/${folder}" está sem a propriedade obrigatória "data" ou "execute". Ignorando...`);
+      }
+    } catch (err) {
+      console.error(`[ERRO CARREGAMENTO] Falha ao carregar o comando ${file} em ${folder}:`, err.message);
+    }
   }
 }
 
-// Carregando manipuladores de eventos
-const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
+// ==========================================
+// 📥 CARREGAMENTO DE EVENTOS
+// ==========================================
+const eventsPath = path.join(__dirname, 'events');
+const eventFiles = fs.readdirSync(eventsPath).filter(file => file.endsWith('.js'));
+
 for (const file of eventFiles) {
-  const event = require(`./events/${file}`);
-  if (event.once) {
-    client.once(event.name, (...args) => event.execute(...args, client));
-  } else {
-    client.on(event.name, (...args) => event.execute(...args, client));
+  const filePath = path.join(eventsPath, file);
+  try {
+    const event = require(filePath);
+    if (event.once) {
+      client.once(event.name, (...args) => event.execute(...args, client));
+    } else {
+      client.on(event.name, (...args) => event.execute(...args, client));
+    }
+  } catch (err) {
+    console.error(`[ERRO EVENTO] Falha ao carregar o evento ${file}:`, err.message);
   }
 }
 
-// Inicializando o servidor web administrativo
-const { startDashboard } = require('./dashboard/server.js');
-startDashboard(client);
+// ==========================================
+// 🗃️ CONEXÃO MONGODBAtlas & INICIALIZAÇÃO
+// ==========================================
+mongoose.set('bufferCommands', false); // Desativa o buffer para evitar travamentos silenciosos de conexão lenta
 
-// Autenticando o Bot no Discord
-client.login(process.env.DISCORD_TOKEN).catch(console.error);
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => {
+    console.log('[BANCO DE DADOS] Conectado ao MongoDB com sucesso.');
+    
+    // Inicia o painel Express passando o cliente do bot do Discord
+    startDashboard(client);
 
-// Tratamento global de erros para estabilidade da aplicação
-process.on('unhandledRejection', error => {
-  console.error('[ERRO NÃO TRATADO]', error);
-});
+    // Conecta o bot do Discord
+    client.login(process.env.DISCORD_TOKEN);
+  })
+  .catch((err) => {
+    console.error('[ERRO BANCO DE DADOS] Falha crítica de conexão ao MongoDB:', err.message);
+    process.exit(1);
+  });
