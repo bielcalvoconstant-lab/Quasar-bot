@@ -15,16 +15,14 @@ module.exports = {
     // ==========================================
     if (process.env.YOUTUBE_COOKIE) {
       try {
-        // CORREÇÃO: Limpa as aspas duplas literais que o Railway possa ter mantido no início e no fim
         const cleanedCookie = process.env.YOUTUBE_COOKIE.replace(/^"+|"+$/g, '').trim();
         
-        // Exibe o cookie limpo no console para você verificar se foi descriptografado certo
         const truncatedCheck = cleanedCookie.substring(0, 60);
         console.log(`[PLAY-DL DEBUG] Cookie limpo carregado no terminal: "${truncatedCheck}..."`);
 
         await play.setToken({
           youtube: {
-            cookie: cleanedCookie // Envia o cookie limpo de forma 100% correta
+            cookie: cleanedCookie
           }
         });
         console.log('[PLAY-DL] Cookies do YouTube injetados com sucesso. Proteção anti-bot ativa.');
@@ -33,6 +31,21 @@ module.exports = {
       }
     } else {
       console.warn('[PLAY-DL AVISO] Nenhuma variável YOUTUBE_COOKIE foi configurada no Railway. Transmissões do YouTube podem falhar por bloqueio de robô.');
+    }
+
+    // ==========================================
+    // 🎫 CONFIGURAÇÃO DE TOKEN ESTÁVEL DO SOUNDCLOUD (FALLBACK)
+    // ==========================================
+    try {
+      // Injeta um client_id estável do SoundCloud para garantir que o fallback funcione em servidores de nuvem
+      await play.setToken({
+        soundcloud: {
+          client_id: process.env.SOUNDCLOUD_CLIENT_ID || '2t9loNQH90kzJcsFCODdigxfp325aq4z' // ID estável que evita o erro de "client_id" indefinido
+        }
+      });
+      console.log('[PLAY-DL] Token do SoundCloud configurado com sucesso para fallback.');
+    } catch (scErr) {
+      console.error('[PLAY-DL ERRO] Falha ao injetar token do SoundCloud:', scErr.message);
     }
 
     // ==========================================
