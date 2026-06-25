@@ -1,13 +1,17 @@
 // index.js
 require('dotenv').config();
 
-// CONFIGURAÇÃO AUTOMÁTICA DO CAMINHO DO FFMPEG ESTÁTICO
+// CONFIGURAÇÃO ROBUSTA: Insere o FFmpeg estático no PATH global do sistema do Railway
 try {
+  const path = require('path');
   const ffmpeg = require('ffmpeg-static');
-  process.env.FFMPEG_PATH = ffmpeg; // Informa dinamicamente ao Discord e ao prism-media onde o FFmpeg está
-  console.log('[SISTEMA] FFmpeg estático localizado e configurado com sucesso no ambiente.');
+  const ffmpegDir = path.dirname(ffmpeg);
+  
+  // Insere a pasta do FFmpeg no início do PATH do Linux
+  process.env.PATH = `${ffmpegDir}${path.delimiter}${process.env.PATH}`;
+  console.log('[SISTEMA] FFmpeg injetado com sucesso no PATH do sistema.');
 } catch (err) {
-  console.warn('[AVISO] Não foi possível carregar o ffmpeg-static de forma automática:', err.message);
+  console.warn('[AVISO] Não foi possível injetar o FFmpeg de forma automática:', err.message);
 }
 
 const { Client, GatewayIntentBits, Collection } = require('discord.js');
