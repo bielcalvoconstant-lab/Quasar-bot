@@ -26,6 +26,25 @@ const getRedirectUri = (req) => {
   return `${baseUrl}/auth/discord/callback`;
 };
 
+// Formata a duração para exibição web
+function formatDuration(duration) {
+  if (typeof duration === 'string') return duration;
+  if (!duration) return '0:00';
+  
+  const totalSeconds = Math.floor(duration / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor((totalSeconds / 60) % 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  
+  const sStr = seconds < 10 ? `0${seconds}` : seconds;
+  const mStr = minutes < 10 ? `0${minutes}` : minutes;
+  
+  if (hours > 0) {
+    return `${hours}:${mStr}:${sStr}`;
+  }
+  return `${minutes}:${sStr}`;
+}
+
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -423,7 +442,7 @@ app.post('/dashboard/guild/:guildId/update', async (req, res) => {
 });
 
 // ==========================================
-// 📻 CONTROLADORES DO PLAYER WEB DE MÚSICA
+// 📻 CONTROLADORES DO PLAYER WEB DE MÚSICA (SOUNDCLOUD ONLY)
 // ==========================================
 
 app.post('/dashboard/guild/:guildId/music/volume', async (req, res) => {
@@ -473,7 +492,7 @@ app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
   res.sendStatus(200);
 });
 
-// CORREÇÃO: Adicionar músicas pelo site salvando estritamente a "finalUrl" garantida do YouTube/Spotify
+// CORREÇÃO: Adiciona músicas usando o motor do SoundCloud como prioritário e exclusivo
 app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
@@ -487,38 +506,37 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
   }
 
   try {
-    let ytInfo = null;
-    let finalUrl = null; // Garante que a URL gerada seja sempre um link válido de vídeo
+    let scInfo = null;
+    let finalUrl = null;
     const isSpotify = play.sp_validate(query);
+    const isSoundcloud = play.sc_validate(query);
 
-    if (isSpotify && isSpotify !== 'search') {
+    if (isSpotify && isSpotify === 'track') {
       const spotifyData = await play.spotify(query);
-      if (isSpotify === 'track') {
-        const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
-        const searchResults = await play.search(searchQuery, { limit: 1 });
-        if (searchResults && searchResults.length > 0) {
-          finalUrl = searchResults[0].url;
-          ytInfo = await play.video_info(finalUrl);
-        }
-      }
-    } else if (play.yt_validate(query) === 'video') {
-      finalUrl = query;
-      ytInfo = await play.video_info(query);
-    } else {
-      const searchResults = await play.search(query, { limit: 1 });
+      const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
+      const searchResults = await play.search(searchQuery, { source: { soundcloud: 'tracks' }, limit: 1 });
       if (searchResults && searchResults.length > 0) {
         finalUrl = searchResults[0].url;
-        ytInfo = await play.video_info(finalUrl);
+        scInfo = searchResults[0];
+      }
+    } else if (isSoundcloud && isSoundcloud === 'track') {
+      finalUrl = query;
+      scInfo = await play.soundcloud(query);
+    } else {
+      // Busca de texto padrão agora usa exclusivamente o SoundCloud
+      const searchResults = await play.search(query, { source: { soundcloud: 'tracks' }, limit: 1 });
+      if (searchResults && searchResults.length > 0) {
+        finalUrl = searchResults[0].url;
+        scInfo = searchResults[0];
       }
     }
 
-    // CORREÇÃO: Usamos a finalUrl e o ytInfo validados para preencher a fila sem nulos
-    if (ytInfo && finalUrl) {
+    if (scInfo && finalUrl) {
       const song = {
-        title: ytInfo.video_details.title,
+        title: scInfo.name || scInfo.title,
         url: finalUrl,
-        duration: ytInfo.video_details.durationRaw,
-        thumbnail: ytInfo.video_details.thumbnails[0]?.url || ''
+        duration: formatDuration(scInfo.duration),
+        thumbnail: scInfo.thumbnail || ''
       };
 
       serverQueue.songs.push(song);
@@ -529,7 +547,7 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
 
       return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Música+adicionada+com+sucesso+pelo+site!`);
     } else {
-      return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Não+foi+possível+carregar+as+informações+desta+faixa.`);
+      return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Não+foi+possível+encontrar+esta+faixa+no+SoundCloud.`);
     }
 
   } catch (err) {
