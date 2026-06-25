@@ -1,839 +1,632 @@
 const express = require('express');
 const session = require('express-session');
-const path = require('path');
-const DiscordOAuth2 = require('discord-oauth2');
-const nodemailer = require('nodemailer');
-const crypto = require('crypto');
-const Stripe = require('stripe');
 const MongoStore = require('connect-mongo');
-const GuildConfig = require('../models/GuildConfig');
+const mongoose = require('mongoose');
+const path = require('path');
+const crypto = require('crypto');
+const axios = require('axios');
+const play = require('play-dl');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
 const User = require('../models/User');
 const BotSettings = require('../models/BotSettings');
-const { liveUpdatePanel } = require('../utils/panelUpdater');
-const { EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
+const GuildConfig = require('../models/GuildConfig');
 
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const { queues, deleteQueue, playSong } = require('../utils/musicManager');
+
+const app = express();
+
+app.set('trust proxy', 1); 
+
+let discordClient = null;
+
+const getRedirectUri = (req) => {
+  const rawBaseUrl = process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`;
+  const baseUrl = rawBaseUrl.replace(/\/$/, '');
+  return `${baseUrl}/auth/discord/callback`;
+};
+
+function formatDuration(duration) {
+  if (typeof duration === 'string') return duration;
+  if (!duration) return '0:00';
+  
+  const totalSeconds = Math.floor(duration / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor((totalSeconds / 60) % 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  
+  const sStr = seconds < 10 ? `0${seconds}` : seconds;
+  const mStr = minutes < 10 ? `0${minutes}` : minutes;
+  
+  if (hours > 0) {
+    return `${hours}:${mStr}:${sStr}`;
+  }
+  return `${minutes}:${sStr}`;
+}
+
+app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error(`[WEBHOOK ERROR] ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const sessionData = event.data.object;
+    const clientReferenceId = sessionData.client_reference_id;
+
+    if (clientReferenceId) {
+      await User.findByIdAndUpdate(clientReferenceId, { isVip: true });
+      console.log(`[STRIPE] VIP ativado com sucesso para o usuário ID: ${clientReferenceId}`);
+    }
+  }
+
+  res.json({ received: true });
+});
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.set('view engine', 'ejs');
+app.set('views', path.join(__dirname, 'views'));
+
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'chave_secreta_reserva_quasar_123',
+  resave: false,
+  saveUninitialized: false,
+  proxy: true,
+  store: MongoStore.create({
+    clientPromise: mongoose.connection.asPromise().then(conn => conn.getClient()),
+    ttl: 30 * 24 * 60 * 60
+  }),
+  cookie: {
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    secure: false, 
+    httpOnly: true
+  }
+}));
+
+// ==========================================
+// 🛠️ FUNÇÕES AUXILIARES DE SEGURANÇA
+// ==========================================
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
-  return `${salt}:${hash}`;
+  return { salt, hash };
 }
 
-function verifyPassword(password, storedPassword) {
-  if (!storedPassword || !storedPassword.includes(':')) return false;
-  const [salt, originalHash] = storedPassword.split(':');
-  const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
-  return hash === originalHash;
+function verifyPassword(password, salt, hash) {
+  const verifyHash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
+  return verifyHash === hash;
 }
 
-module.exports = (client) => {
-  const app = express();
+async function sendBrevoEmail(toEmail, subject, textContent) {
+  const senderEmail = process.env.BREVO_SENDER_EMAIL;
 
-  app.set('trust proxy', 1);
-
-  const oauth = new DiscordOAuth2({
-    clientId: process.env.CLIENT_ID,
-    clientSecret: process.env.CLIENT_SECRET,
-    redirectUri: `${process.env.DASHBOARD_URL}/auth/callback`
-  });
-
-  const transporter = nodemailer.createTransport({
-    service: process.env.SMTP_HOST && process.env.SMTP_HOST.includes('gmail') ? 'gmail' : undefined,
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_PORT === '465',
-    auth: {
-      user: process.env.SMTP_USER || '', 
-      pass: process.env.SMTP_PASS || ''  
-    }
-  });
-
-  app.set('views', path.join(__dirname, 'views'));
-  app.set('view engine', 'ejs');
-
-  // STRIPE WEBHOOK
-  app.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-
-    if (!stripe) return res.status(500).send('Stripe não configurado no .env');
-
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    } catch (err) {
-      console.error('[STRIPE WEBHOOK ERRO SIGNATURE]:', err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
-      const email = session.metadata.email || session.customer_details.email;
-      if (email) {
-        await User.findOneAndUpdate(
-          { email: email.toLowerCase() },
-          { isVip: true, stripeCustomerId: session.customer }
-        );
-        console.log(`[STRIPE] Assinatura VIP ativada com sucesso para: ${email}`);
-      }
-    }
-
-    if (event.type === 'customer.subscription.deleted') {
-      const subscription = event.data.object;
-      await User.findOneAndUpdate(
-        { stripeCustomerId: subscription.customer },
-        { isVip: false }
-      );
-      console.log(`[STRIPE] Assinatura cancelada para o cliente: ${subscription.customer}`);
-    }
-
-    res.json({ received: true });
-  });
-
-  app.use(express.urlencoded({ extended: true }));
-  app.use(express.json());
-
-  // CORREÇÃO: Mapeamento de Sessão com MongoStore explícito para persistência de login por 30 dias sem interrupções
-  app.use(session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    store: MongoStore.create({
-      mongoUrl: process.env.MONGO_URI,
-      ttl: 30 * 24 * 60 * 60, // 30 dias ativo
-      autoRemove: 'native'
-    }),
-    cookie: {
-      secure: false,
-      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 dias em milissegundos
-    }
-  }));
-
-  function checkAuth(req, res, next) {
-    if (req.session && req.session.user) {
-      return next();
-    }
-    res.redirect('/login');
+  if (!senderEmail) {
+    console.warn('[AVISO BREVO] O envio de e-mail foi abortado porque a variável BREVO_SENDER_EMAIL não está configurada no Railway.');
+    return;
   }
 
-  async function checkVerifiedEmail(req, res, next) {
-    if (!req.session.user) return res.redirect('/login');
-    const dbUser = await User.findOne({ email: req.session.user.email });
-    if (dbUser && dbUser.isVerified) {
-      req.session.userRole = dbUser.role;
-      return next();
-    }
-    res.redirect('/verify-otp?email=' + encodeURIComponent(req.session.user.email));
+  try {
+    await axios.post('https://api.brevo.com/v3/smtp/email', {
+      sender: { name: "Quasar Bot", email: senderEmail },
+      to: [{ email: toEmail }],
+      subject: subject,
+      textContent: textContent
+    }, {
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch (err) {
+    console.error('[ERRO BREVO]', err.response ? err.response.data : err.message);
   }
+}
 
-  // --- DISPARO DE ALERTAS DE ACESSO ---
-  async function sendLoginAlertEmail(email, ip, userAgent) {
-    if (process.env.BREVO_API_KEY) {
-      try {
-        const timestamp = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
-        await fetch('https://api.brevo.com/v3/smtp/email', {
-          method: 'POST',
-          headers: {
-            'api-key': process.env.BREVO_API_KEY,
-            'accept': 'application/json',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            sender: {
-              name: 'Krypton Security',
-              email: process.env.SMTP_USER || 'krypton.noreply@gmail.com'
-            },
-            to: [{ email: email }],
-            subject: '⚠️ Alerta de Acesso - Painel Krypton',
-            htmlContent: `<div style="font-family: sans-serif; padding: 20px; background-color: #0f172a; color: #f8fafc; border-radius: 10px; max-width: 500px;">
-                            <h2 style="color: #ef4444; margin-bottom: 5px;">Alerta de Segurança</h2>
-                            <p style="font-size: 13px; color: #94a3b8; line-height: 1.5;">Olá! Detectamos que a sua conta do Painel Administrativo Krypton acabou de ser acessada.</p>
-                            <div style="background-color: #1e293b; padding: 15px; border-radius: 8px; margin: 20px 0; font-size: 12px; color: #cbd5e1; line-height: 1.8;">
-                              <strong>📅 Horário:</strong> ${timestamp} BRT<br>
-                              <strong>🌐 IP de Conexão:</strong> ${ip}<br>
-                              <strong>💻 Dispositivo:</strong> ${userAgent}
-                            </div>
-                            <p style="font-size: 11px; color: #64748b; line-height: 1.5;">Se foi você, nenhuma ação é necessária. Se você não reconhece esta atividade, recomendamos redefinir a sua senha de acesso imediatamente.</p>
-                           </div>`
-          })
-        });
-      } catch (err) {
-        console.error('[ERRO ALERTA LOGIN]', err.message);
-      }
-    }
+async function sendLoginAlert(userEmail, req) {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const userAgent = req.headers['user-agent'] || 'Desconhecido';
+  const dataHora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+
+  const text = `Um novo login foi detectado na sua conta Quasar.\n\nData/Hora: ${dataHora}\nEndereço de IP: ${ip}\nDispositivo/Navegador: ${userAgent}`;
+  await sendBrevoEmail(userEmail, "⚠️ Alerta de Segurança: Novo Login", text);
+}
+
+// ROTA RAIZ
+app.get('/', (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (req.session.user) {
+    return res.redirect(`${baseUrl}/dashboard`);
   }
+  return res.redirect(`${baseUrl}/auth`);
+});
 
-  async function sendSecurityEmail(email, code, isReset = false) {
-    if (process.env.BREVO_API_KEY) {
-      try {
-        await fetch('https://api.brevo.com/v3/smtp/email', {
-          method: 'POST',
-          headers: {
-            'api-key': process.env.BREVO_API_KEY,
-            'accept': 'application/json',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            sender: {
-              name: 'Krypton Security',
-              email: process.env.SMTP_USER || 'krypton.noreply@gmail.com'
-            },
-            to: [{ email: email }],
-            subject: isReset ? '🔑 Recuperação de Senha - Krypton' : '🔐 Código de Segurança - Painel Krypton',
-            htmlContent: `<div style="font-family: sans-serif; padding: 20px; background-color: #0f172a; color: #f8fafc; border-radius: 10px; max-width: 500px;">
-                            <h2 style="color: #8b5cf6;">Krypton Security</h2>
-                            <p style="font-size: 14px; color: #94a3b8;">Olá! Use o código de 6 dígitos abaixo para verificar a sua conta.</p>
-                            <div style="font-size: 28px; font-weight: bold; letter-spacing: 4px; text-align: center; margin: 30px 0; color: #a78bfa;">${code}</div>
-                            <p style="font-size: 11px; color: #64748b;">Esse código expira em instantes. Se você não solicitou este acesso, ignore este e-mail.</p>
-                           </div>`
-          })
-        });
-      } catch (err) {
-        console.error('[ERRO DISPARO BREVO]', err.message);
-      }
+app.get('/auth', (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (req.session.user) return res.redirect(`${baseUrl}/dashboard`);
+
+  const queryError = req.query.error || null;
+  res.render('verify-email', { error: queryError, success: null });
+});
+
+app.post('/auth/register', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.render('verify-email', { error: 'Este e-mail já está cadastrado.', success: null });
     }
-    console.log('\n=============================================');
-    console.log(`[CÓDIGO GERADO PARA ${email}]: ${code}`);
-    console.log('=============================================\n');
+
+    const { salt, hash } = hashPassword(password);
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    await User.create({
+      email,
+      passwordHash: hash,
+      salt,
+      isVerified: false,
+      otp,
+      otpExpires: Date.now() + 15 * 60 * 1000
+    });
+
+    await sendBrevoEmail(email, "🔑 Código Quasar", `Seu código é: ${otp}`);
+    req.session.pendingEmail = email;
+    return res.render('verify-otp', { email, error: null });
+  } catch (error) {
+    console.error(error);
+    return res.render('verify-email', { error: 'Erro no servidor.', success: null });
   }
+});
 
-  // --- ROTAS DO SITE ---
+app.post('/auth/verify-otp', async (req, res) => {
+  const { otp } = req.body;
+  const email = req.session.pendingEmail;
+  if (!email) return res.redirect('/auth');
 
-  app.get('/', (req, res) => {
-    res.render('index', { 
-      user: req.session.user || null, 
-      clientId: process.env.CLIENT_ID 
-    });
-  });
-
-  // Tela de Login
-  app.get('/login', (req, res) => {
-    if (req.session.user) return res.redirect('/dashboard');
-    res.render('verify-email', { user: null, error: req.query.error || null, mode: 'login' });
-  });
-
-  // POST Login Local (Acesso Instantâneo sem OTP)
-  app.post('/login', async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) return res.redirect('/login?error=Preencha todos os campos.');
-
-    try {
-      const dbUser = await User.findOne({ email: email.toLowerCase() });
-      if (!dbUser || !verifyPassword(password, dbUser.password)) {
-        return res.redirect('/login?error=E-mail ou senha incorretos.');
-      }
-
-      req.session.user = { email: dbUser.email, id: dbUser.discordId };
-      req.session.isVerifiedEmail = true;
-      req.session.userRole = dbUser.role;
-
-      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
-      const userAgent = req.headers['user-agent'] || 'Dispositivo desconhecido';
-      sendLoginAlertEmail(dbUser.email, ip, userAgent);
-
-      req.session.save(() => {
-        if (!dbUser.discordId) {
-          res.redirect('/verify-email-auth');
-        } else {
-          res.redirect('/dashboard');
-        }
-      });
-    } catch (err) {
-      res.redirect('/login?error=Erro interno de autenticação.');
-    }
-  });
-
-  // Tela de Cadastro
-  app.get('/register', (req, res) => {
-    res.render('verify-email', { user: null, error: req.query.error || null, mode: 'register' });
-  });
-
-  // POST Cadastro Local - Envia OTP por e-mail para validar criação de conta
-  app.post('/register', async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) return res.redirect('/register?error=Preencha todos os campos.');
-
-    try {
-      const existingUser = await User.findOne({ email: email.toLowerCase() });
-      if (existingUser) return res.redirect('/register?error=E-mail já cadastrado no sistema.');
-
-      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
-
-      req.session.tempUser = {
-        email: email.toLowerCase(),
-        password: hashPassword(password),
-        otp: otpCode,
-        otpExpires
-      };
-
-      sendSecurityEmail(email, otpCode);
-
-      req.session.save(() => {
-        res.redirect(`/verify-otp?email=${encodeURIComponent(email)}`);
-      });
-    } catch (err) {
-      res.redirect('/register?error=Erro ao processar solicitação.');
-    }
-  });
-
-  // CORREÇÃO: Rota GET do OTP liberada publicamente para permitir que novos registros enviem os códigos sem travar na barreira de login
-  app.get('/verify-otp', (req, res) => {
-    res.render('verify-otp', { 
-      user: req.session.user || null, 
-      email: req.query.email || '', 
-      error: req.query.error || null 
-    });
-  });
-
-  // POST de Verificação do OTP de Cadastro (Cria no banco)
-  app.post('/verify-otp', async (req, res) => {
-    const { email, code } = req.body;
-    const temp = req.session.tempUser;
-
-    if (!temp || temp.email !== email.toLowerCase() || temp.otp !== code || new Date() > new Date(temp.otpExpires)) {
-      return res.redirect(`/verify-otp?email=${encodeURIComponent(email)}&error=Código incorreto ou expirado.`);
+  try {
+    const user = await User.findOne({ email });
+    if (!user || user.otp !== otp || user.otpExpires < Date.now()) {
+      return res.render('verify-otp', { email, error: 'Código inválido ou expirado.' });
     }
 
-    try {
-      const role = temp.email === 'mafiosodashopping@gmail.com' ? 'superadmin' : 'user';
+    user.isVerified = true;
+    user.otp = undefined;
+    user.otpExpires = undefined;
+    await user.save();
 
-      const dbUser = await User.create({
-        email: temp.email,
-        password: temp.password,
-        isVerified: true,
-        role
-      });
+    req.session.pendingEmail = null;
+    return res.render('verify-email', { error: null, success: 'E-mail verificado! Acesse com seu login.' });
+  } catch (error) {
+    return res.render('verify-otp', { email, error: 'Erro de validação.' });
+  }
+});
 
-      req.session.tempUser = null;
-
-      req.session.user = { email: dbUser.email, id: dbUser.discordId };
-      req.session.isVerifiedEmail = true;
-      req.session.userRole = dbUser.role;
-
-      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
-      const userAgent = req.headers['user-agent'] || 'Dispositivo desconhecido';
-      sendLoginAlertEmail(dbUser.email, ip, userAgent);
-
-      req.session.save(() => {
-        if (!dbUser.discordId) {
-          res.redirect('/verify-email-auth');
-        } else {
-          res.redirect('/dashboard');
-        }
-      });
-    } catch (err) {
-      res.redirect('/register?error=Erro ao criar usuário no banco.');
-    }
-  });
-
-  // --- RECUPERAÇÃO DE SENHA ---
-
-  app.get('/forgot-password', (req, res) => {
-    res.render('verify-email', { user: null, error: req.query.error || null, mode: 'forgot' });
-  });
-
-  app.post('/forgot-password', async (req, res) => {
-    const { email } = req.body;
-    const dbUser = await User.findOne({ email: email.toLowerCase() });
-
-    if (!dbUser) return res.redirect('/forgot-password?error=E-mail não cadastrado no painel.');
-
-    const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-    dbUser.resetToken = resetCode;
-    dbUser.resetTokenExpires = new Date(Date.now() + 15 * 60 * 1000);
-    await dbUser.save();
-
-    sendSecurityEmail(email, resetCode, true);
-
-    res.redirect(`/reset-password?email=${encodeURIComponent(email)}`);
-  });
-
-  app.get('/reset-password', (req, res) => {
-    res.render('verify-email', { user: null, error: req.query.error || null, email: req.query.email || '', mode: 'reset' });
-  });
-
-  app.post('/reset-password', async (req, res) => {
-    const { email, code, newPassword } = req.body;
-    const dbUser = await User.findOne({ email: email.toLowerCase() });
-
-    if (!dbUser || dbUser.resetToken !== code || new Date() > dbUser.resetTokenExpires) {
-      return res.redirect(`/reset-password?email=${encodeURIComponent(email)}&error=Código incorreto ou expirado.`);
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  try {
+    const user = await User.findOne({ email });
+    if (!user || !user.isVerified) {
+      return res.render('verify-email', { error: 'E-mail não verificado ou não cadastrado.', success: null });
     }
 
-    dbUser.password = hashPassword(newPassword);
-    dbUser.resetToken = null;
-    dbUser.resetTokenExpires = null;
-    await dbUser.save();
-
-    res.redirect('/login?error=Senha alterada com sucesso! Faça login.');
-  });
-
-  app.post('/verify-email', async (req, res) => {
-    const { email } = req.body;
-    const dbUser = await User.findOne({ email: email.toLowerCase() });
-    if (!dbUser) return res.redirect('/login');
-
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    dbUser.otp = otpCode;
-    dbUser.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
-    await dbUser.save();
-
-    sendSecurityEmail(email, otpCode);
-    res.redirect(`/verify-otp?email=${encodeURIComponent(email)}`);
-  });
-
-  // --- NOVO: INTEGRAÇÃO INTEGRAL GOOGLE OAUTH2 (Porta 443 - HTTPS API) ---
-
-  // Redireciona o usuário para a tela de login do Google
-  app.get('/auth/google', (req, res) => {
-    const rootUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
-    const options = {
-      redirect_uri: `${process.env.DASHBOARD_URL}/auth/google/callback`,
-      client_id: process.env.GOOGLE_CLIENT_ID,
-      access_type: 'offline',
-      response_type: 'code',
-      prompt: 'consent',
-      scope: [
-        'https://www.googleapis.com/auth/userinfo.profile',
-        'https://www.googleapis.com/auth/userinfo.email'
-      ].join(' ')
-    };
-    const qs = new URLSearchParams(options);
-    res.redirect(`${rootUrl}?${qs.toString()}`);
-  });
-
-  // Callback de retorno do Google
-  app.get('/auth/google/callback', async (req, res) => {
-    const { code } = req.query;
-    if (!code) return res.redirect('/login?error=Acesso negado pelo Google.');
-
-    try {
-      // 1. Troca o código pelo Token de Acesso (POST Seguro)
-      const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          code,
-          client_id: process.env.GOOGLE_CLIENT_ID,
-          client_secret: process.env.GOOGLE_CLIENT_SECRET,
-          redirect_uri: `${process.env.DASHBOARD_URL}/auth/google/callback`,
-          grant_type: 'authorization_code'
-        })
-      });
-
-      const tokenData = await tokenResponse.json();
-      if (!tokenResponse.ok) {
-        console.error('[ERRO TOKEN GOOGLE]', tokenData);
-        return res.redirect('/login?error=Erro ao obter token do Google.');
-      }
-
-      // 2. Busca o perfil do usuário no Google usando o Token
-      const userResponse = await fetch('https://www.googleapis.com/oauth2/v1/userinfo', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
-      });
-
-      const googleUser = await userResponse.json();
-      if (!userResponse.ok) {
-        return res.redirect('/login?error=Erro ao obter dados de usuário do Google.');
-      }
-
-      const email = googleUser.email.toLowerCase();
-      let dbUser = await User.findOne({ email });
-
-      // Se o usuário não existe no banco, cria a conta instantaneamente (Sem OTP)
-      if (!dbUser) {
-        const randomPassword = crypto.randomBytes(16).toString('hex');
-        const encryptedPassword = hashPassword(randomPassword);
-        const role = email === 'mafiosodashopping@gmail.com' ? 'superadmin' : 'user';
-
-        dbUser = await User.create({
-          email,
-          password: encryptedPassword,
-          isVerified: true, // Já validado pelo Google
-          role
-        });
-      } else {
-        dbUser.isVerified = true;
-        await dbUser.save();
-      }
-
-      req.session.user = { email: dbUser.email, id: dbUser.discordId };
-      req.session.isVerifiedEmail = true;
-      req.session.userRole = dbUser.role;
-
-      // Dispara o alerta de acesso por segurança
-      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
-      const userAgent = req.headers['user-agent'] || 'Dispositivo desconhecido';
-      sendLoginAlertEmail(dbUser.email, ip, userAgent);
-
-      req.session.save(() => {
-        if (!dbUser.discordId) {
-          res.redirect('/verify-email-auth'); // Força a vincular a conta ao Discord
-        } else {
-          res.redirect('/dashboard');
-        }
-      });
-
-    } catch (err) {
-      console.error('[ERRO OAUTH GOOGLE]', err);
-      res.redirect('/login?error=Erro interno no login com o Google.');
-    }
-  });
-
-  // --- STRIPE CHECKOUT ---
-  app.get('/stripe/checkout', checkAuth, async (req, res) => {
-    if (!stripe) return res.status(500).send('Stripe não está configurado.');
-
-    try {
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price: process.env.STRIPE_PRICE_ID, 
-            quantity: 1,
-          },
-        ],
-        mode: 'subscription',
-        success_url: `${process.env.DASHBOARD_URL}/dashboard?checkout_success=true`,
-        cancel_url: `${process.env.DASHBOARD_URL}/dashboard?checkout_cancel=true`,
-        customer_email: req.session.user.email,
-        metadata: {
-          email: req.session.user.email
-        }
-      });
-      res.redirect(session.url);
-    } catch (err) {
-      console.error('[ERRO STRIPE CHECKOUT]', err);
-      res.status(500).send('Erro ao inicializar sessão de pagamento do Stripe.');
-    }
-  });
-
-  // --- DISCORD OAUTH2 ---
-
-  app.get('/auth/login', (req, res) => {
-    const url = oauth.generateAuthUrl({
-      scope: ['identify', 'guilds'],
-      state: 'krypton_secret_state'
-    });
-    res.redirect(url);
-  });
-
-  app.get('/auth/callback', async (req, res) => {
-    const { code } = req.query;
-    if (!code) return res.redirect('/');
-
-    try {
-      const tokenData = await oauth.tokenRequest({
-        code,
-        scope: ['identify', 'guilds'],
-        grantType: 'authorization_code'
-      });
-
-      const discordUser = await oauth.getUser(tokenData.access_token);
-      const guilds = await oauth.getUserGuilds(tokenData.access_token);
-
-      let dbUser;
-
-      if (req.session.user) {
-        dbUser = await User.findOneAndUpdate(
-          { email: req.session.user.email },
-          { discordId: discordUser.id },
-          { new: true }
-        );
-      } else {
-        dbUser = await User.findOne({ discordId: discordUser.id });
-        
-        if (!dbUser && discordUser.email) {
-          dbUser = await User.findOne({ email: discordUser.email.toLowerCase() });
-        }
-
-        if (!dbUser) {
-          const randomPassword = crypto.randomBytes(16).toString('hex');
-          const encryptedPassword = hashPassword(randomPassword);
-          const role = discordUser.email && discordUser.email.toLowerCase() === 'mafiosodashopping@gmail.com' ? 'superadmin' : 'user';
-
-          dbUser = await User.create({
-            email: discordUser.email ? discordUser.email.toLowerCase() : `${discordUser.username}@discord-user.com`,
-            password: encryptedPassword,
-            discordId: discordUser.id,
-            isVerified: true,
-            role
-          });
-        } else {
-          dbUser.discordId = discordUser.id;
-          dbUser.isVerified = true;
-          await dbUser.save();
-        }
-      }
-
-      req.session.user = { email: dbUser.email, id: dbUser.discordId };
-      req.session.guilds = guilds.filter(g => g.owner || (BigInt(g.permissions) & 8n) === 8n);
-      req.session.userRole = dbUser.role;
-
-      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '127.0.0.1';
-      const userAgent = req.headers['user-agent'] || 'Dispositivo desconhecido';
-      sendLoginAlertEmail(dbUser.email, ip, userAgent);
-
-      req.session.save(() => {
-        res.redirect('/dashboard');
-      });
-    } catch (err) {
-      console.error('[ERRO OAUTH CALLBACK]', err);
-      res.redirect('/login?error=Erro ao realizar login com o Discord.');
-    }
-  });
-
-  app.get('/auth/logout', (req, res) => {
-    req.session.destroy(() => {
-      res.redirect('/');
-    });
-  });
-
-  // --- ROTAS DO PAINEL PRINCIPAL ---
-
-  // 1. GET - Página Exclusiva do Bot (mafiosodashopping@gmail.com)
-  app.get('/dashboard/bot/admin', checkAuth, checkVerifiedEmail, async (req, res) => {
-    if (req.session.userRole !== 'superadmin') {
-      return res.status(403).send('Acesso não autorizado.');
+    const isValid = verifyPassword(password, user.salt, user.passwordHash);
+    if (!isValid) {
+      return res.render('verify-email', { error: 'Senha incorreta.', success: null });
     }
 
-    try {
-      let settings = await BotSettings.findOne({ key: 'global' });
-      if (!settings) {
-        settings = await BotSettings.create({ key: 'global' });
-      }
-
-      res.render('bot-admin', { 
-        user: req.session.user, 
-        role: req.session.userRole, 
-        settings, 
-        query: req.query 
-      });
-    } catch (err) {
-      res.status(500).send('Erro interno do servidor.');
-    }
-  });
-
-  // 2. POST - Salvar configurações globais de status e biografia do Bot
-  app.post('/dashboard/bot/admin', checkAuth, checkVerifiedEmail, async (req, res) => {
-    if (req.session.userRole !== 'superadmin') {
-      return res.status(403).send('Acesso não autorizado.');
-    }
-
-    const { activityName, activityType, activityState, status, activityEmoji } = req.body;
-
-    try {
-      const settings = await BotSettings.findOneAndUpdate(
-        { key: 'global' },
-        { 
-          activityName, 
-          activityType: parseInt(activityType), 
-          activityState: activityState || '', 
-          activityEmoji: activityEmoji || '',
-          status 
-        },
-        { upsert: true, new: true }
-      );
-
-      // Atualiza o bot no Discord instantaneamente
-      const activityPayload = {
-        name: settings.activityName || 'Custom Status',
-        type: settings.activityType
-      };
-
-      if (settings.activityState) {
-        activityPayload.state = settings.activityState;
-      }
-
-      if (settings.activityEmoji && settings.activityEmoji.trim() !== '') {
-        activityPayload.emoji = { name: settings.activityEmoji.trim() };
-      }
-
-      client.user.setPresence({
-        status: settings.status,
-        activities: [activityPayload]
-      });
-
-      res.redirect('/dashboard/bot/admin?presence_success=true');
-    } catch (err) {
-      console.error('[ERRO PRESENCE POST]', err);
-      res.redirect('/dashboard/bot/admin?error=Erro ao gravar novos dados.');
-    }
-  });
-
-  // Lista de servidores
-  app.get('/dashboard', checkAuth, checkVerifiedEmail, async (req, res) => {
-    if (!req.session.guilds) {
-      return res.redirect('/verify-email-auth');
-    }
-
-    try {
-      const dbUser = await User.findOne({ email: req.session.user.email });
-
-      res.render('dashboard', { 
-        user: req.session.user, 
-        guilds: req.session.guilds,
-        role: req.session.userRole,
-        isVip: dbUser ? dbUser.isVip : false,
-        query: req.query
-      });
-    } catch (err) {
-      res.status(500).send('Erro interno do servidor.');
-    }
-  });
-
-  // Configuração individual de servidor
-  app.get('/dashboard/:guildId', checkAuth, checkVerifiedEmail, async (req, res) => {
-    const { guildId } = req.params;
-    if (!req.session.guilds) return res.redirect('/verify-email-auth');
+    req.session.user = user;
     
-    const userGuild = req.session.guilds.find(g => g.id === guildId);
-    if (!userGuild) return res.redirect('/dashboard');
+    req.session.save((err) => {
+      if (err) console.error('[ERRO SALVAR SESSÃO LOGOUT/LOGIN]', err);
+      sendLoginAlert(user.email, req).catch(err => console.error(err));
+      return res.redirect(`${baseUrl}/dashboard`);
+    });
+  } catch (error) {
+    return res.render('verify-email', { error: 'Erro interno.', success: null });
+  }
+});
 
-    const discordGuild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
-    if (!discordGuild) {
-      return res.redirect(`https://discord.com/oauth2/authorize?client_id=${process.env.CLIENT_ID}&permissions=8&scope=bot%20applications.commands&guild_id=${guildId}`);
-    }
+app.get('/auth/discord', (req, res) => {
+  const redirectUri = getRedirectUri(req);
+  console.log(`[DISCORD OAUTH] Link de redirecionamento gerado: ${redirectUri}`);
+  const authorizeUrl = `https://discord.com/api/oauth2/authorize?client_id=${process.env.DISCORD_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=identify%20email%20guilds`;
+  res.redirect(authorizeUrl);
+});
 
-    try {
-      let config = await GuildConfig.findOne({ guildId });
-      if (!config) config = await GuildConfig.create({ guildId });
+app.get('/auth/discord/callback', async (req, res) => {
+  const { code } = req.query;
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  
+  if (!code) return res.redirect(`${baseUrl}/auth?error=${encodeURIComponent('Código de autorização ausente.')}`);
 
-      const channels = discordGuild.channels.cache
-        .filter(c => c.type === 0 || c.type === 4)
-        .map(c => ({ id: c.id, name: c.name, type: c.type }));
-        
-      const roles = discordGuild.roles.cache.map(r => ({ id: r.id, name: r.name }));
+  try {
+    const redirectUri = getRedirectUri(req);
+    
+    const tokenResponse = await axios.post('https://discord.com/api/oauth2/token', 
+      new URLSearchParams({
+        client_id: process.env.DISCORD_CLIENT_ID,
+        client_secret: process.env.DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+      }).toString(), 
+      {
+        headers: { 
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)' 
+        }
+      }
+    );
 
-      res.render('guild', { 
-        user: req.session.user, 
-        guild: userGuild, 
-        config,
-        channels,
-        roles,
-        role: req.session.userRole,
-        query: req.query
+    const accessToken = tokenResponse.data.access_token;
+    req.session.accessToken = accessToken;
+
+    const userResponse = await axios.get('https://discord.com/api/users/@me', {
+      headers: { 
+        Authorization: `Bearer ${accessToken}`,
+        'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)'
+      }
+    });
+
+    const discordUser = userResponse.data;
+    const email = discordUser.email || `${discordUser.id}@discord.quasar`;
+
+    if (req.session.user) {
+      const user = await User.findById(req.session.user._id);
+      if (user) {
+        user.discordId = discordUser.id;
+        user.discordAccessToken = accessToken;
+        if (!user.username) user.username = discordUser.username;
+        await user.save();
+        req.session.user = user;
+      }
+      
+      return req.session.save((err) => {
+        if (err) console.error(err);
+        return res.redirect(`${baseUrl}/dashboard`);
       });
-    } catch (dbError) {
-      console.error('[ERRO BANCO NO DASHBOARD]', dbError);
-      res.status(500).send('Erro de comunicação com o banco de dados.');
     }
+
+    let user = await User.findOne({ $or: [{ discordId: discordUser.id }, { email }] });
+    if (!user) {
+      user = await User.create({
+        email,
+        username: discordUser.username,
+        isVerified: true,
+        isVip: false,
+        discordId: discordUser.id,
+        discordAccessToken: accessToken
+      });
+    } else {
+      user.discordId = discordUser.id;
+      user.discordAccessToken = accessToken;
+      await user.save();
+    }
+
+    req.session.user = user;
+    
+    req.session.save((err) => {
+      if (err) console.error(err);
+      return res.redirect(`${baseUrl}/dashboard`);
+    });
+
+  } catch (error) {
+    console.error('[ERRO OAUTH2 DETALHADO]', error.response ? error.response.data : error.message);
+    const detailedMsg = error.response?.data?.error_description || error.response?.data?.error || error.message || 'Erro inesperado na autenticação.';
+    return res.redirect(`${baseUrl}/auth?error=${encodeURIComponent(`Erro de Autenticação: ${detailedMsg}`)}`);
+  }
+});
+
+app.get('/auth/logout', (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  req.session.destroy(() => {
+    res.redirect(`${baseUrl}/auth`);
   });
+});
 
-  // Salvar configurações do Servidor
-  app.post('/dashboard/:guildId/save', checkAuth, checkVerifiedEmail, async (req, res) => {
-    const { guildId } = req.params;
-    const userGuild = req.session.guilds.find(g => g.id === guildId);
-    if (!userGuild) return res.sendStatus(403);
+app.get('/dashboard', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
 
-    const { staffRoleIds, logChannelId, transcriptChannelId, ticketCategory, panelChannelId, title, description, color, thumbnail, image, active, catLabel, catDesc, catEmoji, catValue, catStatus, maxTickets } = req.body;
+  let adminGuilds = [];
+  let token = req.session.accessToken;
 
-    const rolesArray = Array.isArray(staffRoleIds) ? staffRoleIds : (staffRoleIds ? [staffRoleIds] : []);
+  if (!token) {
+    const userDb = await User.findById(req.session.user._id);
+    if (userDb && userDb.discordAccessToken) {
+      token = userDb.discordAccessToken;
+    }
+  }
 
+  if (token) {
     try {
-      const updatedCategories = [];
-      if (Array.isArray(catLabel)) {
-        for (let i = 0; i < catLabel.length; i++) {
-          if (catLabel[i] && catLabel[i].trim() !== '') {
-            updatedCategories.push({
-              value: catValue[i] || `categoria_${Math.random().toString(36).substring(7)}`,
-              label: catLabel[i],
-              description: catDesc[i] || '',
-              emoji: catEmoji[i] || '💬',
-              active: catStatus[i] !== 'hide'
-            });
-          }
+      const guildsResponse = await axios.get('https://discord.com/api/users/@me/guilds', {
+        headers: { 
+          Authorization: `Bearer ${token}`,
+          'User-Agent': 'QuasarBot (https://quasar-bot.up.railway.app, 1.0.0)'
         }
-      } else if (catLabel && catLabel.trim() !== '') {
-        updatedCategories.push({
-          value: catValue || 'suporte',
-          label: catLabel,
-          description: catDesc || '',
-          emoji: catEmoji || '💬',
-          active: catStatus !== 'hide'
-        });
-      }
-
-      const config = await GuildConfig.findOneAndUpdate(
-        { guildId },
-        {
-          staffRoleIds: rolesArray,
-          logChannelId,
-          transcriptChannelId,
-          ticketCategory,
-          panelChannelId,
-          active: active === 'true',
-          'panelEmbed.title': title,
-          'panelEmbed.description': description,
-          'panelEmbed.color': color,
-          'panelEmbed.thumbnail': thumbnail,
-          'panelEmbed.image': image,
-          categories: updatedCategories,
-          maxTickets: parseInt(maxTickets || '3')
-        },
-        { upsert: true, new: true }
-      );
-
-      const discordGuild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
-      if (discordGuild && panelChannelId) {
-        const targetChannel = discordGuild.channels.cache.get(panelChannelId) || await discordGuild.channels.fetch(panelChannelId).catch(() => null);
-        
-        if (targetChannel) {
-          if (config.panelChannelId && config.panelMessageId) {
-            const oldChannel = discordGuild.channels.cache.get(config.panelChannelId) || await discordGuild.channels.fetch(config.panelChannelId).catch(() => null);
-            if (oldChannel) {
-              const oldMsg = await oldChannel.messages.fetch(config.panelMessageId).catch(() => null);
-              if (oldMsg) await oldMsg.delete().catch(() => null);
-            }
-          }
-
-          const embed = new EmbedBuilder()
-            .setTitle(title)
-            .setDescription(description)
-            .setColor(color || '#5865F2');
-
-          if (thumbnail) embed.setThumbnail(thumbnail);
-          if (image) embed.setImage(image);
-
-          const activeCategories = updatedCategories.filter(cat => cat.active !== false);
-
-          const selectMenu = new StringSelectMenuBuilder()
-            .setCustomId('ticket_category_select')
-            .setPlaceholder(active === 'true' ? 'Escolha uma categoria para receber atendimento...' : '❌ SISTEMA DE TICKETS DESATIVADO TEMPORARIAMENTE');
-
-          if (activeCategories.length === 0) {
-            selectMenu.addOptions({ label: 'Nenhuma categoria ativa', value: 'none', description: 'Contate o suporte.' });
-            selectMenu.setDisabled(true);
-          } else {
-            selectMenu.addOptions(
-              activeCategories.slice(0, 25).map(cat => ({
-                label: cat.label,
-                description: cat.description || '',
-                value: cat.value,
-                emoji: parseEmoji(cat.emoji)
-              }))
-            );
-            selectMenu.setDisabled(active !== 'true');
-          }
-
-          const row = new ActionRowBuilder().addComponents(selectMenu);
-          const publicMessage = await targetChannel.send({ embeds: [embed], components: [row] }).catch(() => null);
-
-          if (publicMessage) {
-            config.panelMessageId = publicMessage.id;
-            await config.save();
-          }
-        }
-      }
-
-      res.redirect(`/dashboard/${guildId}?success=true`);
-    } catch (dbError) {
-      console.error('[ERRO AO SALVAR CONFIGS]', dbError);
-      res.status(500).send('Erro ao salvar as configurações.');
+      });
+      adminGuilds = guildsResponse.data.filter(g => g.owner || (parseInt(g.permissions) & 0x8) === 0x8);
+    } catch (error) {
+      console.error('[ERRO GUILDAS]', error.message);
     }
-  });
+  }
 
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`[WEBSITE] Rodando em http://localhost:${PORT}`));
-};
+  res.render('dashboard', { 
+    user: req.session.user, 
+    guilds: adminGuilds, 
+    hasDiscordLinked: !!token,
+    dashboardUrl: baseUrl
+  });
+});
+
+// ==========================================
+// 🛠️ ROTAS DO PAINEL ADMINISTRATIVO DO SERVIDOR
+// ==========================================
+
+app.get('/dashboard/guild/:guildId', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  const { guildId } = req.params;
+
+  if (!discordClient) {
+    return res.redirect(`${baseUrl}/dashboard`);
+  }
+
+  try {
+    const guild = await discordClient.guilds.fetch(guildId).catch(() => null);
+    if (!guild) {
+      return res.redirect(`${baseUrl}/dashboard`);
+    }
+
+    let config = await GuildConfig.findOne({ guildId });
+    if (!config) {
+      config = await GuildConfig.create({ guildId });
+    }
+
+    const channels = guild.channels.cache
+      .filter(c => c.type === 0) 
+      .map(c => ({ id: c.id, name: c.name }));
+
+    const roles = guild.roles.cache
+      .filter(r => r.name !== '@everyone')
+      .map(r => ({ id: r.id, name: r.name }));
+
+    const serverQueue = queues.get(guildId) || null;
+
+    res.render('guild', {
+      guild,
+      config,
+      channels,
+      roles,
+      user: req.session.user,
+      success: req.query.success || null,
+      serverQueue 
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.redirect(`${baseUrl}/dashboard`);
+  }
+});
+
+app.post('/dashboard/guild/:guildId/update', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  const { guildId } = req.params;
+  const { logChannelId, staffRoleId, punishmentLimit } = req.body;
+
+  try {
+    await GuildConfig.findOneAndUpdate(
+      { guildId },
+      { logChannelId, staffRoleId, punishmentLimit: parseInt(punishmentLimit) || 5 },
+      { upsert: true, new: true }
+    );
+
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Configurações+atualizadas+com+sucesso!`);
+  } catch (err) {
+    console.error(err);
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}`);
+  }
+});
+
+// ==========================================
+// 📻 CONTROLADORES DO PLAYER WEB DE MÚSICA (SOUNDCLOUD ONLY)
+// ==========================================
+
+app.post('/dashboard/guild/:guildId/music/volume', async (req, res) => {
+  if (!req.session.user) return res.sendStatus(401);
+  const { guildId } = req.params;
+  const { volume } = req.body; 
+
+  const serverQueue = queues.get(guildId);
+  if (serverQueue) {
+    const parsedVolume = parseFloat(volume) / 100;
+    serverQueue.volume = parsedVolume;
+    
+    if (serverQueue.player && serverQueue.player.state.resource) {
+      serverQueue.player.state.resource.volume?.setVolume(parsedVolume);
+    }
+  }
+  res.sendStatus(200);
+});
+
+app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
+  if (!req.session.user) return res.sendStatus(401);
+  const { guildId } = req.params;
+  const { action } = req.body;
+
+  const serverQueue = queues.get(guildId);
+  if (serverQueue) {
+    switch (action) {
+      case 'pause':
+        serverQueue.player.pause();
+        serverQueue.playing = false;
+        break;
+      case 'resume':
+        serverQueue.player.unpause();
+        serverQueue.playing = true;
+        break;
+      
+      // CORREÇÃO: Função skip atualizada para fazer o shift na fila diretamente e chamar o playSong de forma estável
+      case 'skip':
+        serverQueue.songs.shift(); // Remove a música atual
+        playSong(guildId, serverQueue.songs[0]); // Transmite a próxima faixa instantaneamente
+        break;
+        
+      case 'stop':
+        deleteQueue(guildId);
+        break;
+      case 'toggle247':
+        serverQueue.is247 = !serverQueue.is247;
+        break;
+    }
+  }
+  res.sendStatus(200);
+});
+
+// Adiciona músicas usando o motor do SoundCloud como prioritário e exclusivo
+app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  const { guildId } = req.params;
+  const { query } = req.body;
+
+  const serverQueue = queues.get(guildId);
+  if (!serverQueue) {
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=O+bot+precisa+estar+conectado+em+um+canal+de+voz+pelo+Discord+para+que+você+possa+adicionar+músicas+pelo+site.`);
+  }
+
+  try {
+    let scInfo = null;
+    let finalUrl = null;
+    const isSpotify = play.sp_validate(query);
+    const isSoundcloud = query.includes('soundcloud.com');
+
+    if (isSpotify && isSpotify === 'track') {
+      const spotifyData = await play.spotify(query);
+      const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
+      const searchResults = await play.search(searchQuery, { source: { soundcloud: 'tracks' }, limit: 1 });
+      if (searchResults && searchResults.length > 0) {
+        finalUrl = searchResults[0].url;
+        scInfo = searchResults[0];
+      }
+    } else if (isSoundcloud) {
+      finalUrl = query;
+      scInfo = await play.soundcloud(query);
+    } else {
+      const searchResults = await play.search(query, { source: { soundcloud: 'tracks' }, limit: 1 });
+      if (searchResults && searchResults.length > 0) {
+        finalUrl = searchResults[0].url;
+        scInfo = searchResults[0];
+      }
+    }
+
+    if (scInfo && finalUrl) {
+      const song = {
+        title: scInfo.name || scInfo.title,
+        url: finalUrl,
+        duration: formatDuration(scInfo.duration),
+        thumbnail: scInfo.thumbnail || ''
+      };
+
+      serverQueue.songs.push(song);
+      
+      if (serverQueue.songs.length === 1) {
+        await playSong(guildId, song);
+      }
+
+      return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Música+adicionada+com+sucesso+pelo+site!`);
+    } else {
+      return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Não+foi+possível+encontrar+esta+faixa+no+SoundCloud.`);
+    }
+
+  } catch (err) {
+    console.error('[ERRO ADD WEB]', err);
+    return res.redirect(`${baseUrl}/dashboard/guild/${guildId}?success=Erro+ao+processar+a+música+solicitada.`);
+  }
+});
+
+// Stripe Checkout
+app.post('/stripe/checkout', async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
+
+  try {
+    const sessionCheckout = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
+      mode: 'subscription',
+      success_url: `${baseUrl}/dashboard`,
+      cancel_url: `${baseUrl}/dashboard`,
+      client_reference_id: req.session.user._id.toString()
+    });
+
+    res.redirect(303, sessionCheckout.url);
+  } catch (error) {
+    console.error('[ERRO CHECKOUT]', error.message);
+    res.redirect(`${baseUrl}/dashboard`);
+  }
+});
+
+// Middleware Master
+function isMaster(req, res, next) {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  if (req.session.user && (req.session.user.email === 'mafiosodashopping@gmail.com' || req.session.user.email === process.env.MASTER_EMAIL)) {
+    return next();
+  }
+  return res.redirect(`${baseUrl}/dashboard`);
+}
+
+app.get('/admin', isMaster, async (req, res) => {
+  let settings = await BotSettings.findOne();
+  if (!settings) {
+    settings = { status: 'online', activityEmoji: '💎', activityText: 'Toque músicas de alta definição' };
+  }
+  res.render('bot-admin', { settings });
+});
+
+app.post('/admin/update', isMaster, async (req, res) => {
+  const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  const { status, activityEmoji, activityText } = req.body;
+  try {
+    await BotSettings.findOneAndUpdate({}, { status, activityEmoji, activityText }, { upsert: true, new: true });
+    
+    if (discordClient) {
+      discordClient.user.setPresence({
+        status: status,
+        activities: [{
+          name: 'custom',
+          type: require('discord.js').ActivityType.Custom,
+          state: `${activityEmoji} ${activityText}`
+        }]
+      });
+      console.log('[PRESENÇA] Status e atividade atualizados via painel de administração em tempo real.');
+    }
+
+    return res.redirect(`${baseUrl}/admin`);
+  } catch (error) {
+    return res.redirect(`${baseUrl}/dashboard`);
+  }
+});
+
+function startDashboard(client) {
+  discordClient = client; 
+  const serverPort = process.env.PORT || 3000;
+  app.listen(serverPort, () => {
+    console.log(`[PAINEL WEB] Servidor rodando na porta ${serverPort}`);
+  });
+}
+
+module.exports = { startDashboard };
