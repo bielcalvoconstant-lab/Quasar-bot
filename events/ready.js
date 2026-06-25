@@ -2,7 +2,7 @@ const { Events, ActivityType } = require('discord.js');
 const BotSettings = require('../models/BotSettings');
 const fs = require('fs');
 const path = require('path');
-const play = require('play-dl'); // Importa o play-dl para aplicar os cookies de bypass
+const play = require('play-dl');
 
 module.exports = {
   name: Events.ClientReady,
@@ -15,7 +15,10 @@ module.exports = {
     // ==========================================
     if (process.env.YOUTUBE_COOKIE) {
       try {
-        // Envia os cookies configurados no Railway para o play-dl autenticar as requisições
+        // Diagnóstico visual de truncamento de aspas no Railway
+        const truncatedCheck = process.env.YOUTUBE_COOKIE.substring(0, 60);
+        console.log(`[PLAY-DL DEBUG] Cookie carregado no terminal: "${truncatedCheck}..."`);
+
         await play.setToken({
           youtube: {
             cookie: process.env.YOUTUBE_COOKIE
