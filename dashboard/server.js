@@ -26,7 +26,6 @@ const getRedirectUri = (req) => {
   return `${baseUrl}/auth/discord/callback`;
 };
 
-// Formata a duração para exibição web
 function formatDuration(duration) {
   if (typeof duration === 'string') return duration;
   if (!duration) return '0:00';
@@ -492,7 +491,7 @@ app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
   res.sendStatus(200);
 });
 
-// CORREÇÃO: Adiciona músicas usando o motor do SoundCloud como prioritário e exclusivo
+// Adiciona músicas usando o motor do SoundCloud como prioritário e exclusivo
 app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
   const baseUrl = (process.env.DASHBOARD_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
   if (!req.session.user) return res.redirect(`${baseUrl}/auth`);
@@ -509,7 +508,9 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
     let scInfo = null;
     let finalUrl = null;
     const isSpotify = play.sp_validate(query);
-    const isSoundcloud = play.sc_validate(query);
+    
+    // CORREÇÃO: Validação nativa de string para evitar erros de função inexistente sc_validate
+    const isSoundcloud = query.includes('soundcloud.com');
 
     if (isSpotify && isSpotify === 'track') {
       const spotifyData = await play.spotify(query);
@@ -519,11 +520,10 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
         finalUrl = searchResults[0].url;
         scInfo = searchResults[0];
       }
-    } else if (isSoundcloud && isSoundcloud === 'track') {
+    } else if (isSoundcloud) {
       finalUrl = query;
       scInfo = await play.soundcloud(query);
     } else {
-      // Busca de texto padrão agora usa exclusivamente o SoundCloud
       const searchResults = await play.search(query, { source: { soundcloud: 'tracks' }, limit: 1 });
       if (searchResults && searchResults.length > 0) {
         finalUrl = searchResults[0].url;
