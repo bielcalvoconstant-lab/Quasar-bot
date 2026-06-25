@@ -11,10 +11,10 @@ function withTimeout(promise, ms, errorMessage = 'Tempo limite excedido na requi
   return Promise.race([promise, timeout]);
 }
 
-// Converte a duração de milissegundos para formatação legível (mm:ss)
+// CORREÇÃO: Formata a duração retornada pelo SoundCloud com proteção contra valores vazios/nulos
 function formatDuration(duration) {
   if (typeof duration === 'string') return duration;
-  if (!duration) return '0:00';
+  if (!duration || isNaN(duration)) return '3:30'; // Fallback padrão amigável caso o SoundCloud retorne nulo
   
   const totalSeconds = Math.floor(duration / 1000);
   const seconds = totalSeconds % 60;
@@ -77,7 +77,6 @@ module.exports = {
           const spotifyData = await play.spotify(query);
           const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
           
-          // Busca a faixa correspondente do Spotify no SoundCloud diretamente
           const searchResults = await play.search(searchQuery, { source: { soundcloud: 'tracks' }, limit: 1 });
           if (!searchResults || searchResults.length === 0) {
             return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no SoundCloud para essa música do Spotify.' });
@@ -114,7 +113,6 @@ module.exports = {
         return interaction.editReply({ content: 'Nenhum resultado de música correspondente foi encontrado no SoundCloud.' });
       }
 
-      // Se o usuário colou um link direto do SoundCloud, pula a seleção e toca imediatamente
       if (isSoundcloudLink) {
         const selectedTrack = searchResults[0];
         const song = {
@@ -127,7 +125,6 @@ module.exports = {
         return;
       }
 
-      // Se for busca de texto comum, renderiza o painel interativo de seleção de Top 5
       await renderSelectionMenu(interaction, guild, voiceChannel, searchResults);
 
     } catch (err) {
