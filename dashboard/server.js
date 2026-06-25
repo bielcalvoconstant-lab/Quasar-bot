@@ -477,9 +477,13 @@ app.post('/dashboard/guild/:guildId/music/control', async (req, res) => {
         serverQueue.player.unpause();
         serverQueue.playing = true;
         break;
+      
+      // CORREÇÃO: Função skip atualizada para fazer o shift na fila diretamente e chamar o playSong de forma estável
       case 'skip':
-        serverQueue.player.stop();
+        serverQueue.songs.shift(); // Remove a música atual
+        playSong(guildId, serverQueue.songs[0]); // Transmite a próxima faixa instantaneamente
         break;
+        
       case 'stop':
         deleteQueue(guildId);
         break;
@@ -508,8 +512,6 @@ app.post('/dashboard/guild/:guildId/music/add', async (req, res) => {
     let scInfo = null;
     let finalUrl = null;
     const isSpotify = play.sp_validate(query);
-    
-    // CORREÇÃO: Validação nativa de string para evitar erros de função inexistente sc_validate
     const isSoundcloud = query.includes('soundcloud.com');
 
     if (isSpotify && isSpotify === 'track') {
