@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@discordjs/voice": "^0.17.0",
-    "@snazzah/davey": "^1.1.5",
+    "@snazzah/davey": "latest",
     "axios": "^1.6.0",
     "body-parser": "^1.20.2",
     "connect-mongo": "^5.1.0",
