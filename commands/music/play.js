@@ -11,7 +11,7 @@ function withTimeout(promise, ms, errorMessage = 'Tempo limite excedido na requi
   return Promise.race([promise, timeout]);
 }
 
-// Formata a duração retornada pelo SoundCloud (que pode vir em milissegundos ou string)
+// Formata a duração retornada pelo SoundCloud
 function formatDuration(duration) {
   if (typeof duration === 'string') return duration;
   if (!duration) return '0:00';
@@ -67,7 +67,9 @@ module.exports = {
 
     try {
       const isSpotify = play.sp_validate(query);
-      const isSoundcloudLink = play.sc_validate(query);
+      
+      // CORREÇÃO: Validação nativa de string para SoundCloud sem chamar função inexistente
+      const isSoundcloudLink = query.includes('soundcloud.com');
 
       // ===================================================
       // 🚀 FLUXO DE LINKS DIRETOS (Spotify ou SoundCloud)
@@ -86,7 +88,7 @@ module.exports = {
           }
           finalUrl = searchResults[0].url;
           ytInfo = searchResults[0];
-        } else if (isSoundcloudLink && isSoundcloudLink === 'track') {
+        } else if (isSoundcloudLink) {
           finalUrl = query;
           ytInfo = await play.soundcloud(query);
         } else {
@@ -171,7 +173,6 @@ module.exports = {
       const row = new ActionRowBuilder().addComponents(selectMenu);
       const response = await interaction.editReply({ embeds: [embed], components: [row] });
 
-      // Cria coletor para capturar a escolha do usuário
       const collector = response.createMessageComponentCollector({
         componentType: ComponentType.StringSelect,
         time: 30000
@@ -220,7 +221,6 @@ module.exports = {
             .setDescription(`**[${song.title}](${song.url})**\nDuração: \`${song.duration}\``)
             .setColor('#3b82f6');
 
-          // Limpa o menu de seleção e mostra o tocando agora
           await i.editReply({ embeds: [playEmbed], components: [] });
         } else {
           serverQueue.songs.push(song);
