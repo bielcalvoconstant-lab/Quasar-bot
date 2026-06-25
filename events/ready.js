@@ -11,39 +11,16 @@ module.exports = {
     console.log(`[QUASAR BOT] Logado com sucesso como ${client.user.tag}`);
 
     // ==========================================
-    // 🛡️ CONFIGURAÇÃO DE BYPASS ANTI-BOT DO YOUTUBE
-    // ==========================================
-    if (process.env.YOUTUBE_COOKIE) {
-      try {
-        const cleanedCookie = process.env.YOUTUBE_COOKIE.replace(/^[\\"\s]+|[\\"\s]+$/g, '').trim();
-        
-        const truncatedCheck = cleanedCookie.substring(0, 60);
-        console.log(`[PLAY-DL DEBUG] Cookie limpo carregado no terminal: "${truncatedCheck}..."`);
-
-        await play.setToken({
-          youtube: {
-            cookie: cleanedCookie
-          }
-        });
-        console.log('[PLAY-DL] Cookies do YouTube injetados com sucesso. Proteção anti-bot ativa.');
-      } catch (cookieErr) {
-        console.error('[PLAY-DL ERRO] Falha ao injetar os cookies do YouTube no reprodutor:', cookieErr.message);
-      }
-    } else {
-      console.warn('[PLAY-DL AVISO] Nenhuma variável YOUTUBE_COOKIE foi configurada no Railway. Transmissões do YouTube podem falhar por bloqueio de robô.');
-    }
-
-    // ==========================================
-    // 🎫 CONFIGURAÇÃO DE TOKEN ESTÁVEL DO SOUNDCLOUD (FALLBACK)
+    // 🎫 CONFIGURAÇÃO DE BYPASS DO SOUNDCLOUD (EXCLUSIVO)
     // ==========================================
     try {
-      // CORREÇÃO: Utiliza a chave pública ativa 'qMNlQ19f7XBPO8xzq12CnSEiq2zGWrlJ' para evitar o erro 401
+      // Injeta a chave pública ativa do SoundCloud mundial para garantir transmissões estáveis no Railway
       await play.setToken({
         soundcloud: {
           client_id: process.env.SOUNDCLOUD_CLIENT_ID || 'qMNlQ19f7XBPO8xzq12CnSEiq2zGWrlJ'
         }
       });
-      console.log('[PLAY-DL] Token do SoundCloud configurado com sucesso para fallback.');
+      console.log('[PLAY-DL] Token do SoundCloud configurado com sucesso. Motor de busca ativo.');
     } catch (scErr) {
       console.error('[PLAY-DL ERRO] Falha ao injetar token do SoundCloud:', scErr.message);
     }
