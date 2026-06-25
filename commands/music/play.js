@@ -11,14 +11,14 @@ function withTimeout(promise, ms, errorMessage = 'Tempo limite excedido na requi
   return Promise.race([promise, timeout]);
 }
 
-// CORREÇÃO: Formata de forma inteligente tratando segundos (SoundCloud) e milissegundos (YouTube/Spotify)
+// CORREÇÃO: Formata a duração verificando de forma segura se a entrada está em milissegundos ou segundos
 function formatDuration(duration) {
   if (typeof duration === 'string') return duration;
   if (!duration || isNaN(duration)) return '3:30'; 
   
   let totalSeconds = duration;
   
-  // Se a duração for um número gigante, está em milissegundos, então convertemos para segundos
+  // Se o número de duração for muito alto, está em milissegundos, então convertemos para segundos
   if (duration > 36000) {
     totalSeconds = Math.floor(duration / 1000);
   }
@@ -88,10 +88,13 @@ module.exports = {
             return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no SoundCloud para essa música do Spotify.' });
           }
 
+          // CORREÇÃO: Varredura de propriedades de tempo para evitar nulos
+          const durationVal = searchResults[0].duration || searchResults[0].full_duration || searchResults[0].durationInMs || 210000;
+
           const song = {
             title: searchResults[0].name || searchResults[0].title,
-            url: searchResults[0].permalink || searchResults[0].url, // Usa o permalink público amigável
-            duration: formatDuration(searchResults[0].duration),
+            url: searchResults[0].permalink || searchResults[0].url,
+            duration: formatDuration(durationVal),
             thumbnail: searchResults[0].thumbnail || ''
           };
 
@@ -121,10 +124,14 @@ module.exports = {
 
       if (isSoundcloudLink) {
         const selectedTrack = searchResults[0];
+        
+        // CORREÇÃO: Varredura robusta de tempo contra nulos
+        const durationVal = selectedTrack.duration || selectedTrack.full_duration || selectedTrack.durationInMs || 210000;
+
         const song = {
           title: selectedTrack.name || selectedTrack.title,
-          url: selectedTrack.permalink || selectedTrack.url, // CORREÇÃO: Usa o link público permalink para o player e embed
-          duration: formatDuration(selectedTrack.duration),
+          url: selectedTrack.permalink || selectedTrack.url,
+          duration: formatDuration(durationVal),
           thumbnail: selectedTrack.thumbnail || ''
         };
         await handlePlay(interaction, guild, voiceChannel, song);
@@ -191,9 +198,11 @@ async function renderSelectionMenu(interaction, guild, voiceChannel, searchResul
 
   searchResults.forEach((track, index) => {
     const title = track.name || track.title || 'Faixa sem título';
-    const durationStr = formatDuration(track.duration);
     
-    // CORREÇÃO: Usa track.permalink como link público e não o link interno da API
+    // CORREÇÃO: Varredura de tempo contra nulos nos dropdowns
+    const durationVal = track.duration || track.full_duration || track.durationInMs || 210000;
+    const durationStr = formatDuration(durationVal);
+    
     const displayUrl = track.permalink || track.url;
 
     embed.addFields({ 
@@ -226,10 +235,13 @@ async function renderSelectionMenu(interaction, guild, voiceChannel, searchResul
     const selectedIndex = parseInt(i.values[0]);
     const selectedTrack = searchResults[selectedIndex];
 
+    // CORREÇÃO: Varredura de tempo contra nulos na faixa selecionada
+    const durationVal = selectedTrack.duration || selectedTrack.full_duration || selectedTrack.durationInMs || 210000;
+
     const song = {
       title: selectedTrack.name || selectedTrack.title,
-      url: selectedTrack.permalink || selectedTrack.url, // CORREÇÃO: Salva o link amigável
-      duration: formatDuration(selectedTrack.duration),
+      url: selectedTrack.permalink || selectedTrack.url, 
+      duration: formatDuration(durationVal),
       thumbnail: selectedTrack.thumbnail || ''
     };
 
