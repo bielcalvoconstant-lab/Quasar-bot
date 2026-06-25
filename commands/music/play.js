@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ComponentType } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer } = require('@discordjs/voice');
 const play = require('play-dl');
 const User = require('../../models/User');
@@ -11,10 +11,29 @@ function withTimeout(promise, ms, errorMessage = 'Tempo limite excedido na requi
   return Promise.race([promise, timeout]);
 }
 
+// Formata a duração retornada pelo SoundCloud (que pode vir em milissegundos ou string)
+function formatDuration(duration) {
+  if (typeof duration === 'string') return duration;
+  if (!duration) return '0:00';
+  
+  const totalSeconds = Math.floor(duration / 1000);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor((totalSeconds / 60) % 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  
+  const sStr = seconds < 10 ? `0${seconds}` : seconds;
+  const mStr = minutes < 10 ? `0${minutes}` : minutes;
+  
+  if (hours > 0) {
+    return `${hours}:${mStr}:${sStr}`;
+  }
+  return `${minutes}:${sStr}`;
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Toca uma música do YouTube/Spotify no canal de voz (VIP).')
+    .setDescription('Busca e toca músicas do SoundCloud/Spotify no canal de voz (VIP).')
     .addStringOption(option =>
       option.setName('busca')
         .setDescription('Nome da música ou link de reprodução')
@@ -47,112 +66,179 @@ module.exports = {
     const query = options.getString('busca');
 
     try {
-      let ytInfo = null;
-      let finalUrl = null; 
       const isSpotify = play.sp_validate(query);
+      const isSoundcloudLink = play.sc_validate(query);
 
-      // CONVERSÃO DE SPOTIFY PARA YOUTUBE
-      if (isSpotify && isSpotify !== 'search') {
-        try {
+      // ===================================================
+      // 🚀 FLUXO DE LINKS DIRETOS (Spotify ou SoundCloud)
+      // ===================================================
+      if (isSpotify || isSoundcloudLink) {
+        let ytInfo = null;
+        let finalUrl = null;
+
+        if (isSpotify && isSpotify === 'track') {
+          // Converte faixa do Spotify para busca no SoundCloud
           const spotifyData = await play.spotify(query);
-          if (isSpotify === 'track') {
-            const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
-            const searchResults = await withTimeout(
-              play.search(searchQuery, { limit: 1 }),
-              8000,
-              'A busca da faixa correspondente do Spotify expirou.'
-            );
-            if (!searchResults || searchResults.length === 0) {
-              return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no YouTube para essa música do Spotify.' });
-            }
-            
-            finalUrl = searchResults[0].url || `https://www.youtube.com/watch?v=${searchResults[0].id}`;
-            ytInfo = await withTimeout(
-              play.video_info(finalUrl),
-              8000,
-              'Tempo limite excedido ao carregar os dados do YouTube para a faixa do Spotify.'
-            );
-          } else {
-            return interaction.editReply({ content: 'No momento, suportamos apenas faixas individuais (Tracks) de links do Spotify.' });
+          const searchQuery = `${spotifyData.name} - ${spotifyData.artists.map(a => a.name).join(' ')}`;
+          const searchResults = await play.search(searchQuery, { source: { soundcloud: 'tracks' }, limit: 1 });
+          if (!searchResults || searchResults.length === 0) {
+            return interaction.editReply({ content: 'Não encontramos nenhuma versão compatível no SoundCloud para essa música do Spotify.' });
           }
-        } catch (spErr) {
-          console.error(spErr);
-          return interaction.editReply({ content: 'Falha ao processar o link do Spotify. Verifique se a música é pública.' });
+          finalUrl = searchResults[0].url;
+          ytInfo = searchResults[0];
+        } else if (isSoundcloudLink && isSoundcloudLink === 'track') {
+          finalUrl = query;
+          ytInfo = await play.soundcloud(query);
+        } else {
+          return interaction.editReply({ content: 'No momento, suportamos apenas faixas individuais (Tracks) de links do Spotify/SoundCloud.' });
         }
-      } else if (play.yt_validate(query) === 'video') {
-        finalUrl = query; 
-        ytInfo = await withTimeout(
-          play.video_info(query),
-          8000,
-          'O servidor do YouTube demorou muito para responder a este link.'
-        );
-      } else {
-        // Busca de texto do YouTube
-        const searchResults = await withTimeout(
-          play.search(query, { limit: 1 }),
-          8000,
-          'A busca expirou devido à lentidão de resposta dos servidores do YouTube.'
-        );
 
-        if (!searchResults || searchResults.length === 0) {
-          return interaction.editReply({ content: 'Nenhum resultado de música correspondente foi encontrado.' });
+        const song = {
+          title: ytInfo.name || ytInfo.title,
+          url: finalUrl,
+          duration: formatDuration(ytInfo.duration),
+          thumbnail: ytInfo.thumbnail || ''
+        };
+
+        let serverQueue = queues.get(guild.id);
+        if (!serverQueue) {
+          serverQueue = createQueue(guild.id, interaction.channel, voiceChannel);
+          const connection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: guild.id,
+            adapterCreator: guild.voiceAdapterCreator,
+          });
+          const player = createAudioPlayer();
+          serverQueue.connection = connection;
+          serverQueue.player = player;
+          connection.subscribe(player);
+
+          serverQueue.songs.push(song);
+          await playSong(guild.id, song);
+
+          const playEmbed = new EmbedBuilder()
+            .setTitle('🎶 Tocando Agora')
+            .setDescription(`**[${song.title}](${song.url})**\nDuração: \`${song.duration}\``)
+            .setColor('#3b82f6');
+
+          return interaction.editReply({ embeds: [playEmbed] });
+        } else {
+          serverQueue.songs.push(song);
+          return interaction.editReply({ content: `Adicionado à fila de reprodução: **${song.title}**` });
         }
+      }
+
+      // ===================================================
+      // 🔍 FLUXO DE BUSCA TEXTUAL (Retorna Top 5 no SoundCloud)
+      // ===================================================
+      const searchResults = await withTimeout(
+        play.search(query, { source: { soundcloud: 'tracks' }, limit: 5 }),
+        8000,
+        'A busca de faixas no SoundCloud expirou por lentidão.'
+      );
+
+      if (!searchResults || searchResults.length === 0) {
+        return interaction.editReply({ content: 'Nenhum resultado de música correspondente foi encontrado no SoundCloud.' });
+      }
+
+      // Constrói o Embed de Exibição do Top 5
+      const embed = new EmbedBuilder()
+        .setTitle('🔍 Seleção de Músicas - Quasar')
+        .setDescription('Selecione uma das 5 melhores faixas encontradas no menu abaixo:')
+        .setColor('#3b82f6')
+        .setFooter({ text: 'Menu expira em 30 segundos.' });
+
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId('quasar_play_select')
+        .setPlaceholder('Escolha uma das faixas para tocar...');
+
+      searchResults.forEach((track, index) => {
+        const title = track.name || track.title || 'Faixa sem título';
+        const durationStr = formatDuration(track.duration);
         
-        finalUrl = searchResults[0].url || `https://www.youtube.com/watch?v=${searchResults[0].id}`;
-        ytInfo = await withTimeout(
-          play.video_info(finalUrl),
-          8000,
-          'Falha ao obter metadados da música selecionada.'
-        );
-      }
-
-      if (!finalUrl || finalUrl.includes('undefined')) {
-        throw new Error('Não foi possível obter uma URL de reprodução válida para o vídeo do YouTube.');
-      }
-
-      const song = {
-        title: ytInfo.video_details.title,
-        url: finalUrl, 
-        duration: ytInfo.video_details.durationRaw,
-        thumbnail: ytInfo.video_details.thumbnails[0]?.url || ''
-      };
-
-      let serverQueue = queues.get(guild.id);
-
-      if (!serverQueue) {
-        serverQueue = createQueue(guild.id, interaction.channel, voiceChannel);
-
-        const connection = joinVoiceChannel({
-          channelId: voiceChannel.id,
-          guildId: guild.id,
-          adapterCreator: guild.voiceAdapterCreator,
+        embed.addFields({ 
+          name: `${index + 1}. ${title}`, 
+          value: `Duração: \`${durationStr}\` • [Link](${track.url})` 
         });
 
-        const player = createAudioPlayer();
+        selectMenu.addOptions({
+          label: `${index + 1}. ${title.substring(0, 80)}`,
+          value: index.toString(),
+          description: `Duração: ${durationStr}`
+        });
+      });
 
-        serverQueue.connection = connection;
-        serverQueue.player = player;
-        connection.subscribe(player);
+      const row = new ActionRowBuilder().addComponents(selectMenu);
+      const response = await interaction.editReply({ embeds: [embed], components: [row] });
 
-        serverQueue.songs.push(song);
-        
-        await playSong(guild.id, song);
+      // Cria coletor para capturar a escolha do usuário
+      const collector = response.createMessageComponentCollector({
+        componentType: ComponentType.StringSelect,
+        time: 30000
+      });
 
-        const playEmbed = new EmbedBuilder()
-          .setTitle('🎶 Tocando Agora')
-          .setDescription(`**[${song.title}](${song.url})**\nDuração: \`${song.duration}\``)
-          .setThumbnail(song.thumbnail)
-          .setColor('#3b82f6');
+      collector.on('collect', async i => {
+        if (i.user.id !== interaction.user.id) {
+          return i.reply({ content: 'Você não pode escolher músicas na busca de outro usuário.', ephemeral: true });
+        }
 
-        return interaction.editReply({ embeds: [playEmbed] });
-      } else {
-        serverQueue.songs.push(song);
-        return interaction.editReply({ content: `Adicionado à fila de reprodução: **${song.title}**` });
-      }
+        await i.deferUpdate();
+
+        const selectedIndex = parseInt(i.values[0]);
+        const selectedTrack = searchResults[selectedIndex];
+
+        const song = {
+          title: selectedTrack.name || selectedTrack.title,
+          url: selectedTrack.url,
+          duration: formatDuration(selectedTrack.duration),
+          thumbnail: selectedTrack.thumbnail || ''
+        };
+
+        let serverQueue = queues.get(guild.id);
+
+        if (!serverQueue) {
+          serverQueue = createQueue(guild.id, interaction.channel, voiceChannel);
+
+          const connection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: guild.id,
+            adapterCreator: guild.voiceAdapterCreator,
+          });
+
+          const player = createAudioPlayer();
+
+          serverQueue.connection = connection;
+          serverQueue.player = player;
+          connection.subscribe(player);
+
+          serverQueue.songs.push(song);
+          
+          await playSong(guild.id, song);
+
+          const playEmbed = new EmbedBuilder()
+            .setTitle('🎶 Tocando Agora')
+            .setDescription(`**[${song.title}](${song.url})**\nDuração: \`${song.duration}\``)
+            .setColor('#3b82f6');
+
+          // Limpa o menu de seleção e mostra o tocando agora
+          await i.editReply({ embeds: [playEmbed], components: [] });
+        } else {
+          serverQueue.songs.push(song);
+          await i.editReply({ content: `Adicionado à fila de reprodução: **${song.title}**`, embeds: [], components: [] });
+        }
+
+        collector.stop();
+      });
+
+      collector.on('end', collected => {
+        if (collected.size === 0) {
+          interaction.editReply({ content: 'Tempo de seleção expirado.', embeds: [], components: [] }).catch(() => null);
+        }
+      });
 
     } catch (err) {
       console.error('[ERRO PLAY COMMAND]', err);
-      return interaction.editReply({ content: `❌ **Falha ao reproduzir áudio**: ${err.message || 'Lentidão temporária do YouTube.'}` });
+      return interaction.editReply({ content: `❌ **Falha ao reproduzir áudio**: ${err.message || 'Lentidão temporária do SoundCloud.'}` });
     }
   }
 };
