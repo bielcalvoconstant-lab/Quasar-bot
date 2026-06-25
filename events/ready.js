@@ -15,13 +15,16 @@ module.exports = {
     // ==========================================
     if (process.env.YOUTUBE_COOKIE) {
       try {
-        // Diagnóstico visual de truncamento de aspas no Railway
-        const truncatedCheck = process.env.YOUTUBE_COOKIE.substring(0, 60);
-        console.log(`[PLAY-DL DEBUG] Cookie carregado no terminal: "${truncatedCheck}..."`);
+        // CORREÇÃO: Limpa as aspas duplas literais que o Railway possa ter mantido no início e no fim
+        const cleanedCookie = process.env.YOUTUBE_COOKIE.replace(/^"+|"+$/g, '').trim();
+        
+        // Exibe o cookie limpo no console para você verificar se foi descriptografado certo
+        const truncatedCheck = cleanedCookie.substring(0, 60);
+        console.log(`[PLAY-DL DEBUG] Cookie limpo carregado no terminal: "${truncatedCheck}..."`);
 
         await play.setToken({
           youtube: {
-            cookie: process.env.YOUTUBE_COOKIE
+            cookie: cleanedCookie // Envia o cookie limpo de forma 100% correta
           }
         });
         console.log('[PLAY-DL] Cookies do YouTube injetados com sucesso. Proteção anti-bot ativa.');
