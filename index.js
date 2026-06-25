@@ -1,5 +1,15 @@
 // index.js
 require('dotenv').config();
+
+// CONFIGURAÇÃO AUTOMÁTICA DO CAMINHO DO FFMPEG ESTÁTICO
+try {
+  const ffmpeg = require('ffmpeg-static');
+  process.env.FFMPEG_PATH = ffmpeg; // Informa dinamicamente ao Discord e ao prism-media onde o FFmpeg está
+  console.log('[SISTEMA] FFmpeg estático localizado e configurado com sucesso no ambiente.');
+} catch (err) {
+  console.warn('[AVISO] Não foi possível carregar o ffmpeg-static de forma automática:', err.message);
+}
+
 const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const mongoose = require('mongoose');
 const fs = require('fs');
@@ -33,11 +43,10 @@ for (const folder of commandFolders) {
     try {
       const command = require(filePath);
       
-      // CORREÇÃO: Validação de segurança recomendada pela documentação oficial do Discord.js v14
+      // Validação de segurança recomendada pela documentação oficial do Discord.js v14
       if (command && 'data' in command && 'execute' in command && command.data && command.data.name) {
         client.commands.set(command.data.name, command);
       } else {
-        // Se o arquivo for inválido ou de backup, exibe um aviso limpo no console em vez de derrubar o bot
         console.warn(`[AVISO COMANDO] O arquivo "${file}" em "commands/${folder}" está sem a propriedade obrigatória "data" ou "execute". Ignorando...`);
       }
     } catch (err) {
