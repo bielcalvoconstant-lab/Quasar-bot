@@ -15,7 +15,7 @@ module.exports = {
     // ==========================================
     if (process.env.YOUTUBE_COOKIE) {
       try {
-        const cleanedCookie = process.env.YOUTUBE_COOKIE.replace(/^"+|"+$/g, '').trim();
+        const cleanedCookie = process.env.YOUTUBE_COOKIE.replace(/^[\\"\s]+|[\\"\s]+$/g, '').trim();
         
         const truncatedCheck = cleanedCookie.substring(0, 60);
         console.log(`[PLAY-DL DEBUG] Cookie limpo carregado no terminal: "${truncatedCheck}..."`);
@@ -37,10 +37,10 @@ module.exports = {
     // 🎫 CONFIGURAÇÃO DE TOKEN ESTÁVEL DO SOUNDCLOUD (FALLBACK)
     // ==========================================
     try {
-      // Injeta um client_id estável do SoundCloud para garantir que o fallback funcione em servidores de nuvem
+      // CORREÇÃO: Utiliza a chave pública ativa 'qMNlQ19f7XBPO8xzq12CnSEiq2zGWrlJ' para evitar o erro 401
       await play.setToken({
         soundcloud: {
-          client_id: process.env.SOUNDCLOUD_CLIENT_ID || '2t9loNQH90kzJcsFCODdigxfp325aq4z' // ID estável que evita o erro de "client_id" indefinido
+          client_id: process.env.SOUNDCLOUD_CLIENT_ID || 'qMNlQ19f7XBPO8xzq12CnSEiq2zGWrlJ'
         }
       });
       console.log('[PLAY-DL] Token do SoundCloud configurado com sucesso para fallback.');
